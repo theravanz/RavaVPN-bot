@@ -10,6 +10,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiogram.types import LinkPreviewOptions
 
 from database import init_db
 from handlers_admin import router as admin_router
@@ -30,10 +31,16 @@ if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не задан — добавь в переменные окружения")
 
 # ========= ИНИЦИАЛИЗАЦИЯ =========
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+bot = Bot(
+    token=BOT_TOKEN, 
+    default=DefaultBotProperties(
+        link_preview=LinkPreviewOptions(is_disabled=True)
+    )
+)
+
 dp = Dispatcher()
 
-dp.include_router(admin_router)   # админский роутер первым, как и раньше
+dp.include_router(admin_router)
 dp.include_router(user_router)
 
 
@@ -49,7 +56,6 @@ async def on_startup(bot: Bot):
             allowed_updates=dp.resolve_used_update_types(),
             secret_token=WEBHOOK_SECRET,
             drop_pending_updates=True,
-            link_preview_is_disabled=True, 
         )
         logging.info(f"✅ Webhook установлен: {WEBHOOK_URL}")
     else:
