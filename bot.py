@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import os
+from dotenv import load_dotenv
+
 
 from aiohttp import web
 
@@ -12,6 +14,8 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from database import init_db
 from handlers_admin import router as admin_router
 from handlers_user import router as user_router
+
+load_dotenv()   # ← подхватит .env, если он есть; на Render молча пропустит
 
 # ========= ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ =========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -35,7 +39,9 @@ dp.include_router(user_router)
 
 # ========= STARTUP (срабатывает в обоих режимах) =========
 async def on_startup(bot: Bot):
+    logging.info("🗄 Подключаюсь к БД...")
     await init_db()
+    logging.info("🗄 БД готова")
 
     if WEBHOOK_URL:
         await bot.set_webhook(
@@ -46,9 +52,10 @@ async def on_startup(bot: Bot):
         )
         logging.info(f"✅ Webhook установлен: {WEBHOOK_URL}")
     else:
-        # локальный режим — вебхук сбрасываем, если стоял
         await bot.delete_webhook(drop_pending_updates=False)
-        logging.info("✅ Работаем через polling (локально)")
+        logging.info("✅ Режим polling")
+
+    logging.info(f"🌍 PORT={PORT}, WEBHOOK_URL={WEBHOOK_URL}")
 
 
 # ========= HEALTHCHECK =========
