@@ -49,6 +49,7 @@ async def on_startup(bot: Bot):
             allowed_updates=dp.resolve_used_update_types(),
             secret_token=WEBHOOK_SECRET,
             drop_pending_updates=True,
+            link_preview_is_disabled=True, 
         )
         logging.info(f"✅ Webhook установлен: {WEBHOOK_URL}")
     else:

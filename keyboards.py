@@ -21,10 +21,14 @@ def main_menu_keyboard():
 def admin_main_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="📊 Статистика", callback_data="adm:stats")
-    kb.button(text="👥 Пользователи и подписки", callback_data="adm:users")
-    kb.button(text="🎨 Кастомизация", callback_data="adm:custom")
-    kb.button(text="📢 Рассылка", callback_data="adm:broadcast")
-    kb.button(text="🚪 Выйти в меню", callback_data="adm:exit")
+    kb.button(text="⚙️ Кастомизация (конфиг)", callback_data="adm:custom")
+    kb.button(text="👥 Работа с пользователями и подписками", callback_data="adm:users")
+    kb.button(text="🏦 Вывод средств", callback_data="adm:withdraw")
+    kb.button(text="💰 Пополнить баланс", callback_data="adm:topup")
+    kb.button(text="🎲 Доп. функции", callback_data="adm:extra")
+    kb.button(text="📨 Рассылка", callback_data="adm:broadcast")
+    kb.button(text="📈 UTM Метки", callback_data="adm:utm")
+    kb.button(text="➡️ В меню бота", callback_data="adm:exit")
     kb.adjust(1)
     return kb.as_markup()
 

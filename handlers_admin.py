@@ -5,6 +5,7 @@ from aiogram import Bot, Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import func, select
 
 from database import (
@@ -68,7 +69,7 @@ async def cmd_admin(message: Message, state: FSMContext):
 async def admin_main(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
-    await callback.message.answer(await _panel_text(), reply_markup=admin_main_kb())
+    await _render(callback.message, await _panel_text(), admin_main_kb())
 
 @router.callback_query(F.data == "adm:exit")
 async def admin_exit(callback: CallbackQuery):
@@ -83,7 +84,31 @@ async def admin_exit(callback: CallbackQuery):
 async def stub_sections(callback: CallbackQuery):
     await callback.answer("🚧 Раздел в разработке", show_alert=True)
 
+async def _render(
+    target: Message,
+    text: str,
+    kb,
+    *,
+    also_delete: Message | None = None,
+):
+    """Редактирует сообщение панелью; опционально удаляет мусор (юзер-инпут)."""
+    try:
+        await target.edit_text(text, reply_markup=kb)
+    except Exception:
+        await target.answer(text, reply_markup=kb)   # если нечего править — новое сообщение
+    if also_delete:
+        try:
+            await also_delete.delete()
+        except Exception:
+            pass
+
 # ========= СТАТИСТИКА =========
+def stats_back_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="adm:main")
+    return kb.as_markup()
+
+
 @router.callback_query(F.data == "adm:stats")
 async def admin_stats(callback: CallbackQuery):
     st = await get_stats()
@@ -94,8 +119,8 @@ async def admin_stats(callback: CallbackQuery):
         f"⏰ {PLANS[key][0]}: {st['plan_counts'].get(key, 0)}"
         for key in ("1d", "3d", "1m", "3m", "6m")
     )
-
-    await callback.message.answer(
+    await _render(
+        callback.message,
         f"📊 <b>Статистика бота {s.bot_name}</b>\n\n"
         f"👥 <b>Пользователи</b>\n"
         f"Всего: <b>{st['total']}</b>\n"
@@ -108,7 +133,7 @@ async def admin_stats(callback: CallbackQuery):
         f"💰 <b>Пополнения и покупки</b>\n"
         f"Покупок подписок: <b>{st['buys_count']}</b> на <b>{fmt_money(st['buys_sum'])} ₽</b>\n"
         f"Пополнений баланса: <b>{st['topups_count']}</b> на <b>{fmt_money(st['topups_sum'])} ₽</b>",
-        reply_markup=admin_main_kb(),
+        stats_back_kb(),
     )
 
 
@@ -117,14 +142,14 @@ async def admin_stats(callback: CallbackQuery):
 async def users_menu(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
-    await callback.message.answer("👥 <b>Пользователи и подписки</b>", reply_markup=users_menu_kb())
+    await _render(callback.message, "👥 <b>Пользователи и подписки</b>", users_menu_kb())
 
 
 @router.callback_query(F.data == "usr:menu")
 async def users_menu_back(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
-    await callback.message.answer("👥 <b>Пользователи и подписки</b>", reply_markup=users_menu_kb())
+    await _render(callback.message, "👥 <b>Пользователи и подписки</b>", users_menu_kb())
 
 
 @router.callback_query(F.data == "usr:list")
@@ -149,7 +174,28 @@ async def users_list(callback: CallbackQuery):
     kb.button(text="⬅️ Назад", callback_data="usr:menu")
     kb.adjust(1)
     await callback.message.answer(f"📋 <b>Последние юзеры:</b>\n\n{text}", reply_markup=kb.as_markup())
+    await _render(callback.message, f"📋 <b>Последние юзеры:</b>\n\n{text}", kb.as_markup())
 
+async def _user_card_text(u: User) -> str:
+    now = _utcnow()
+    async with SessionMaker() as session:
+        sub = await session.scalar(
+            select(Subscription)
+            .where(Subscription.user_id == u.id, Subscription.expires_at > now)
+            .order_by(Subscription.expires_at.desc())
+        )
+        paid = await session.scalar(
+            select(func.coalesce(func.sum(Payment.amount), 0)).where(Payment.user_id == u.id)
+        ) or 0
+
+    sub_line = f"{PLANS[sub.plan][0]}, до {sub.expires_at:%d.%m.%Y}" if sub else "нет"
+    return (
+        f"👤 <code>{u.id}</code> — @{u.username or '—'}\n"
+        f"📅 Регистрация: <b>{u.created_at:%d.%m.%Y}</b>\n"
+        f"💎 Подписка: <b>{sub_line}</b>\n"
+        f"💰 Платежей на: <b>{fmt_money(float(paid))} ₽</b>\n"
+        f"{'🚫 ЗАБАНЕН' if u.is_banned else '✅ Активен'}"
+    )
 
 @router.callback_query(F.data.startswith("usr:card:"))
 async def users_card(callback: CallbackQuery, state: FSMContext):
@@ -161,7 +207,6 @@ async def users_card(callback: CallbackQuery, state: FSMContext):
         await callback.answer("❌ Не найден", show_alert=True)
         return
     await callback.answer()
-    await _send_user_card(callback.message, u)
 
 
 @router.callback_query(F.data == "usr:search")
@@ -184,31 +229,6 @@ async def users_search_do(message: Message, state: FSMContext):
     if not u:
         await message.answer("❌ Не найден.", reply_markup=users_menu_kb())
         return
-    await _send_user_card(message, u)
-
-
-async def _send_user_card(message: Message, u: User):
-    now = _utcnow()
-    async with SessionMaker() as session:
-        sub = await session.scalar(
-            select(Subscription)
-            .where(Subscription.user_id == u.id, Subscription.expires_at > now)
-            .order_by(Subscription.expires_at.desc())
-        )
-        paid = await session.scalar(
-            select(func.coalesce(func.sum(Payment.amount), 0)).where(Payment.user_id == u.id)
-        ) or 0
-
-    sub_line = f"{PLANS[sub.plan][0]}, до {sub.expires_at:%d.%m.%Y}" if sub else "нет"
-    await message.answer(
-        f"👤 <code>{u.id}</code> — @{u.username or '—'}\n"
-        f"📅 Регистрация: <b>{u.created_at:%d.%m.%Y}</b>\n"
-        f"💎 Подписка: <b>{sub_line}</b>\n"
-        f"💰 Платежей на: <b>{fmt_money(float(paid))} ₽</b>\n"
-        f"⚖️ Баланс: <b>{fmt_money(float(u.balance))} ₽</b>\n"
-        f"{'🚫 ЗАБАНЕН' if u.is_banned else '✅ Активен'}",
-        reply_markup=user_card_kb(u.id, u.is_banned),
-    )
 
 
 # ========= ВЫДАЧА ПОДПИСКИ ВРУЧНУЮ =========
@@ -267,7 +287,6 @@ async def ban_toggle(callback: CallbackQuery):
         await session.commit()
         banned = u.is_banned
     await callback.answer("🚫 Забанен" if banned else "✅ Разбанен", show_alert=True)
-    await _send_user_card(callback.message, u)
 
 
 # ========= КАСТОМИЗАЦИЯ =========
@@ -277,13 +296,14 @@ async def admin_custom(callback: CallbackQuery, state: FSMContext):
     s = await get_settings()
     photo_status = "✅ установлено" if s.main_menu_photo_id else "❌ не установлено"
     await callback.answer()
-    await callback.message.answer(
+    await _render(
+        callback.message,
         f"🎨 <b>Кастомизация</b>\n\n"
         f"✏️ Название: <b>{s.bot_name}</b>\n"
         f"💬 Тэглайн: <b>{s.bot_tagline}</b>\n"
         f"🌎 Локаций: <b>{len(s.locations.splitlines())}</b>\n"
         f"🖼 Фото меню: {photo_status}",
-        reply_markup=custom_menu_kb(),
+        custom_menu_kb(),
     )
 
 
@@ -334,6 +354,10 @@ async def save_name(message: Message, state: FSMContext):
         await session.commit()
         saved = s.bot_name
     await state.clear()
+    try:
+        await message.delete()
+    except Exception:
+        pass
     await message.answer(f"✅ Название сохранено: <b>{saved}</b>")
 
 
@@ -397,8 +421,16 @@ async def bc_extra(message: Message):
 
 @router.callback_query(F.data == "bc:cancel")
 async def bc_cancel(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
     await state.clear()
     await callback.answer("❌ Отменено")
+
+    if data.get("chat_id") and data.get("message_id"):
+        try:
+            await callback.bot.delete_message(chat_id=data["chat_id"], message_id=data["message_id"])
+        except Exception:
+            pass
+    await callback.message.delete()
     await callback.message.answer("Рассылка отменена.", reply_markup=admin_main_kb())
 
 
@@ -418,17 +450,20 @@ async def bc_send(callback: CallbackQuery, state: FSMContext, bot: Bot):
 
     for uid in user_ids:
         try:
-            await bot.copy_message(
-                chat_id=uid,
-                from_chat_id=data["chat_id"],
-                message_id=data["message_id"],
-            )
+            await bot.copy_message(chat_id=uid, from_chat_id=data["chat_id"], message_id=data["message_id"])
             ok += 1
         except Exception:
             failed += 1
         await asyncio.sleep(0.05)
 
-    await status.edit_text(
+    # чистим за собой: превью рассылки + сообщение со статусом
+    try:
+        await bot.delete_message(chat_id=data["chat_id"], message_id=data["message_id"])
+    except Exception:
+        pass
+    await status.delete()
+
+    await callback.message.answer(
         f"📢 <b>Рассылка завершена</b>\n\n✅ Доставлено: <b>{ok}</b>\n❌ Не доставлено: <b>{failed}</b>",
         reply_markup=admin_main_kb(),
     )
