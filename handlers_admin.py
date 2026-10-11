@@ -24,6 +24,7 @@ class CustomStates(StatesGroup):
 
 class BroadcastStates(StatesGroup):
     waiting = State()
+    confirm = State()
 
 
 # ========= /admin =========
@@ -180,9 +181,6 @@ async def bc_start(callback: CallbackQuery, state: FSMContext):
 @router.message(BroadcastStates.waiting)
 async def bc_preview(message: Message, state: FSMContext):
     await state.update_data(chat_id=message.chat.id, message_id=message.message_id)
-    await state.set_state(BroadcastStates.confirm) if False else None
-    # сохраняем и ждём подтверждения
-    await state.set_data({"chat_id": message.chat.id, "message_id": message.message_id})
     await state.set_state(BroadcastStates.confirm)
     await message.answer(
         f"👀 <b>Превью выше</b> ☝️\n\nПолучателей: <b>{await _users_count()}</b>\nОтправляем?",
@@ -190,7 +188,7 @@ async def bc_preview(message: Message, state: FSMContext):
     )
 
 
-@router.message(BroadcastStates.confirm)  # на случай если юзер написал ещё раз
+@router.message(BroadcastStates.confirm)
 async def bc_extra(message: Message):
     await message.answer("⚠️ Сначала подтверди или отмени рассылку кнопками выше.")
 
