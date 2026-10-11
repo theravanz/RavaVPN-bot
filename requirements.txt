@@ -1,0 +1,5 @@
+aiogram==3.13.1
+sqlalchemy>=2.0
+aiosqlite
+asyncpg
+pydantic-settings
