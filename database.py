@@ -40,6 +40,7 @@ class Settings(Base):
         default="⚡ Быстрый | АВТО\n🌍 Остальные | АВТО\n📱 Мобильный | АВТО",
     )
     main_menu_photo_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    balance: Mapped[float] = mapped_column(Numeric(10, 2), default=0)
 
 
 # ========= ПОЛЬЗОВАТЕЛИ =========
@@ -85,7 +86,6 @@ def _utcnow() -> datetime:
 
 # ========= МИГРАЦИИ =========
 def _add_missing_columns(sync_conn):
-    """create_all не умеет добавлять колонки в существующие таблицы — делаем сами."""
     insp = sa_inspect(sync_conn)
     cols = {c["name"] for c in insp.get_columns("users")}
     if "balance" not in cols:
@@ -95,6 +95,12 @@ def _add_missing_columns(sync_conn):
     if "is_banned" not in cols:
         sync_conn.execute(text(
             "ALTER TABLE users ADD COLUMN is_banned Boolean NOT NULL DEFAULT False"
+        ))
+
+    scols = {c["name"] for c in insp.get_columns("settings")}
+    if "balance" not in scols:
+        sync_conn.execute(text(
+            "ALTER TABLE settings ADD COLUMN balance Numeric(10,2) NOT NULL DEFAULT 0"
         ))
 
 
@@ -138,6 +144,37 @@ async def get_active_subscription(user_id: int) -> Subscription | None:
             .order_by(Subscription.expires_at.desc())
         )
 
+
+async def get_admin_summary() -> dict:
+    """Компактная сводка для шапки админки."""
+    now = _utcnow()
+    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    async with SessionMaker() as session:
+        total = await session.scalar(select(func.count()).select_from(User)) or 0
+        new_today = await session.scalar(
+            select(func.count()).select_from(User).where(User.created_at >= start_of_day)
+        ) or 0
+        subs_active = await session.scalar(
+            select(func.count()).select_from(Subscription).where(Subscription.expires_at > now)
+        ) or 0
+        turnover = await session.scalar(
+            select(func.coalesce(func.sum(Payment.amount), 0))
+        ) or 0
+        sales_today = await session.scalar(
+            select(func.coalesce(func.sum(Payment.amount), 0)).where(
+                Payment.kind == "subscription",
+                Payment.created_at >= start_of_day,
+            )
+        ) or 0
+
+    return {
+        "total": total,
+        "new_today": new_today,
+        "subs_active": subs_active,
+        "turnover": float(turnover),
+        "sales_today": float(sales_today),
+    }
 
 # ========= СТАТИСТИКА (как у франшизы) =========
 async def get_stats() -> dict:

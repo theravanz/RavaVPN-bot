@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 
 from database import (
     PLANS, Payment, SessionMaker, Settings, Subscription, User,
-    _utcnow, fmt_money, get_settings, get_stats, upsert_user,
+    _utcnow, fmt_money, get_admin_summary, get_settings, get_stats, upsert_user,
 )
 from filters import IsAdmin
 from keyboards import (
@@ -40,22 +40,35 @@ class UserStates(StatesGroup):
 
 
 # ========= /admin =========
+ADMIN_PANEL_URL = "https://dashboard.render.com"  # пока ссылаем на Render, потом поменяешь
+
+
+async def _panel_text() -> str:
+    s = await get_settings()
+    st = await get_admin_summary()
+    return (
+        f"🛠 <b>Панель управления франшизой {s.bot_name}</b>\n\n"
+        f"📊 <b>Статистика:</b>\n"
+        f"👥 Пользователей: <b>{st['total']}</b> (+{st['new_today']})\n"
+        f"💎 Активных подписок: <b>{st['subs_active']}</b>\n"
+        f"💰 Оборот бота: <b>{fmt_money(st['turnover'])} ₽</b>\n"
+        f"🛒 Продаж сегодня: <b>{fmt_money(st['sales_today'])} ₽</b>\n\n"
+        f"💰 <b>ВАШ БАЛАНС:</b> <b>{fmt_money(float(s.balance))} ₽</b>\n"
+        f'🔗 <a href="{ADMIN_PANEL_URL}">Доступ в веб-панель</a>'
+    )
+
+
 @router.message(F.text == "/admin")
 async def cmd_admin(message: Message, state: FSMContext):
     await state.clear()
-    s = await get_settings()
-    await message.answer(
-        f"🛠 <b>Админ-панель</b> | <b>{s.bot_name}</b>\n\nВыберите раздел:",
-        reply_markup=admin_main_kb(),
-    )
+    await message.answer(await _panel_text(), reply_markup=admin_main_kb())
 
 
 @router.callback_query(F.data == "adm:main")
 async def admin_main(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
-    await callback.message.answer("🛠 <b>Админ-панель</b>", reply_markup=admin_main_kb())
-
+    await callback.message.answer(await _panel_text(), reply_markup=admin_main_kb())
 
 @router.callback_query(F.data == "adm:exit")
 async def admin_exit(callback: CallbackQuery):
@@ -66,6 +79,9 @@ async def admin_exit(callback: CallbackQuery):
         pass
     await callback.message.answer("👾 Главное меню", reply_markup=main_menu_keyboard())
 
+@router.callback_query(F.data.in_({"adm:withdraw", "adm:topup", "adm:extra", "adm:utm"}))
+async def stub_sections(callback: CallbackQuery):
+    await callback.answer("🚧 Раздел в разработке", show_alert=True)
 
 # ========= СТАТИСТИКА =========
 @router.callback_query(F.data == "adm:stats")

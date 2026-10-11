@@ -1,5 +1,7 @@
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from database import PLANS
+
 
 # ========= ЮЗЕРСКОЕ МЕНЮ =========
 def main_menu_keyboard():
@@ -19,9 +21,9 @@ def main_menu_keyboard():
 def admin_main_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="📊 Статистика", callback_data="adm:stats")
+    kb.button(text="👥 Пользователи и подписки", callback_data="adm:users")
     kb.button(text="🎨 Кастомизация", callback_data="adm:custom")
     kb.button(text="📢 Рассылка", callback_data="adm:broadcast")
-    kb.button(text="👥 Пользователи", callback_data="adm:users")
     kb.button(text="🚪 Выйти в меню", callback_data="adm:exit")
     kb.adjust(1)
     return kb.as_markup()
@@ -46,3 +48,30 @@ def confirm_kb():
     kb.adjust(2)
     return kb.as_markup()
 
+
+# ========= ПОЛЬЗОВАТЕЛИ =========
+def users_menu_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📋 Последние юзеры", callback_data="usr:list")
+    kb.button(text="🔍 Найти юзера", callback_data="usr:search")
+    kb.button(text="⬅️ Назад", callback_data="adm:main")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def user_card_kb(uid: int, banned: bool):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🎁 Выдать подписку", callback_data=f"usr:grant:{uid}")
+    kb.button(text="🚫 Забанить" if not banned else "✅ Разбанить", callback_data=f"usr:ban:{uid}")
+    kb.button(text="⬅️ К списку", callback_data="usr:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def plan_kb():
+    kb = InlineKeyboardBuilder()
+    for key, (name, _) in PLANS.items():
+        kb.button(text=f"⏰ {name}", callback_data=f"usr:plan:{key}")
+    kb.button(text="❌ Отмена", callback_data="usr:menu")
+    kb.adjust(1)
+    return kb.as_markup()
