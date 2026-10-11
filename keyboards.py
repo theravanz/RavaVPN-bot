@@ -3,7 +3,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from database import Settings
 
 
-# ========= ЮЗЕРСКОЕ МЕНЮ (учитывает тумблеры) =========
+# ========= ЮЗЕРСКОЕ МЕНЮ =========
 def main_menu_keyboard(s: Settings):
     kb = InlineKeyboardBuilder()
     kb.button(text="💎 Подписка", callback_data="menu:subscribe")
@@ -48,16 +48,19 @@ def custom_menu_kb(s: Settings):
     kb.button(text="🧩 Главное меню", callback_data="cus:stub")
     kb.button(text="🔗 Ссылка подписки", callback_data="cus:stub")
     kb.button(
-        text=f"📨 Маркетинговые сообщения: {'✅' if s.marketing_enabled else '❌'}",
-        callback_data="cus:tgl:marketing_enabled",
+        text=f"📨 Маркетинговые сообщения: {'Вкл.' if s.marketing_enabled else 'Выкл.'}",
+        callback_data="cus:marketing",
     )
     kb.button(text="🎁 Пробная подписка", callback_data="cus:trial")
     kb.button(text="📢 Изменить канал", callback_data="cus:channel")
+    kb.button(
+        text=f"📢 Обязательная подписка: ❌ выкл",
+        callback_data="cus:stub",
+    )
     kb.button(text="👨‍💻 Изменить техподдержку", callback_data="cus:support")
-    kb.button(text="🔕 Канал уведомлений", callback_data="cus:logs")
+    kb.button(text="🔔 Канал уведомлений", callback_data="cus:logs")
     kb.button(text="🕓 Часовой пояс", callback_data="cus:tz")
     kb.button(text="🖼 Картинки к сообщениям", callback_data="cus:stub")
-    kb.button(text="✨ Кастом-эмодзи: ❌", callback_data="cus:stub")
     kb.button(
         text=f"🎰 Рулетка: {'✅ вкл' if s.roulette_enabled else '❌ выкл'}",
         callback_data="cus:tgl:roulette_enabled",
@@ -71,17 +74,48 @@ def custom_menu_kb(s: Settings):
     return kb.as_markup()
 
 
-async def prices_menu_kb():
-    from database import get_plans, fmt_money
-    plans = await get_plans()
+def prices_menu_kb(plans):
+    """plans — только продаваемые (is_active=True)."""
     kb = InlineKeyboardBuilder()
     for p in plans:
-        kb.button(
-            text=f"{p.name} — {fmt_money(float(p.price))}₽ ✏️",
-            callback_data=f"cus:price:{p.key}",
-        )
+        kb.button(text=f"💰 {p.name}", callback_data=f"cus:price:{p.key}")
+    kb.button(text="📱 Устройство при покупке/продлении", callback_data="cus:price:dev_month")
+    kb.button(text="➕ Устройство при добавлении к активной", callback_data="cus:price:dev_day")
     kb.button(text="⬅️ Назад", callback_data="cus:back")
     kb.adjust(1)
+    return kb.as_markup()
+
+
+def trial_kb(enabled: bool, days: int):
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="🚫 Выключить пробную подписку" if enabled else "✅ Включить пробную подписку",
+        callback_data="cus:trial:toggle",
+    )
+    for d in (1, 2, 3, 5, 7):
+        mark = "✅" if (enabled and days == d) else ""
+        kb.button(text=f"{mark} {d} день" if d == 1 else f"{mark} {d} дня", callback_data=f"cus:trial:days:{d}")
+    kb.button(text="⬅️ Назад", callback_data="cus:back")
+    kb.adjust(1, 2, 2, 1, 1)
+    return kb.as_markup()
+
+
+def marketing_kb(enabled: bool):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Включить" if not enabled else "❌ Выключить", callback_data="cus:marketing:toggle")
+    kb.button(text="⬅️ Назад", callback_data="cus:back")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def tz_kb(current: str):
+    kb = InlineKeyboardBuilder()
+    for h in range(-11, 13):
+        label = f"UTC{h:+03d}:00"
+        mark = "✅ " if label == current else ""
+        kb.button(text=f"{mark}{label}", callback_data=f"cus:tz:{h:+d}")
+    kb.button(text="⬅️ Назад", callback_data="cus:back")
+    kb.adjust(3, 3, 3, 3, 3, 3, 3, 3, 1)
     return kb.as_markup()
 
 
@@ -112,9 +146,8 @@ def user_card_kb(uid: int, banned: bool):
     return kb.as_markup()
 
 
-async def plan_kb():
-    from database import get_plans
-    plans = await get_plans()
+def plan_kb(plans):
+    """plans — продаваемые тарифы для ручной выдачи."""
     kb = InlineKeyboardBuilder()
     for p in plans:
         kb.button(text=f"⏰ {p.name}", callback_data=f"usr:plan:{p.key}")

@@ -1,20 +1,23 @@
 import asyncio
+from datetime import timedelta
 
 from aiogram import Bot, Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import func, select
 
 from database import (
-    Payment, Plan, SessionMaker, Settings, Subscription, User,
+    MIN_PRICES, Payment, Plan, SessionMaker, Settings, Subscription, User,
     _utcnow, fmt_money, get_admin_summary, get_plan, get_plans,
     get_settings, get_stats,
 )
 from filters import IsAdmin
 from keyboards import (
     admin_main_kb, back_kb, confirm_kb, custom_menu_kb, main_menu_keyboard,
-    plan_kb, prices_menu_kb, user_card_kb, users_menu_kb,
+    marketing_kb, plan_kb, prices_menu_kb, trial_kb, tz_kb,
+    user_card_kb, users_menu_kb,
 )
 
 router = Router()
@@ -30,8 +33,6 @@ class CustomStates(StatesGroup):
     channel = State()
     support = State()
     logs = State()
-    tz = State()
-    trial_days = State()
 
 
 class BroadcastStates(StatesGroup):
@@ -45,6 +46,7 @@ class UserStates(StatesGroup):
 
 
 ADMIN_PANEL_URL = "https://dashboard.render.com"
+CANCEL_HINT = "\n\n<i>Для отмены отправьте -</i>"
 
 
 # ========= ШАПКА ПАНЕЛИ =========
@@ -63,13 +65,7 @@ async def _panel_text() -> str:
     )
 
 
-async def _render(
-    target: Message,
-    text: str,
-    kb,
-    *,
-    also_delete: Message | None = None,
-):
+async def _render(target: Message, text: str, kb, *, also_delete: Message | None = None):
     try:
         await target.edit_text(text, reply_markup=kb)
     except Exception:
@@ -118,8 +114,7 @@ async def admin_stats(callback: CallbackQuery):
     await callback.answer()
 
     plans_lines = "\n".join(
-        f"⏰ {p.name}: {st['plan_counts'].get(p.key, 0)}"
-        for p in st["plans"]
+        f"⏰ {p.name}: {st['plan_counts'].get(p.key, 0)}" for p in st["plans"]
     )
     await _render(
         callback.message,
@@ -140,15 +135,8 @@ async def admin_stats(callback: CallbackQuery):
 
 
 # ========= ПОЛЬЗОВАТЕЛИ И ПОДПИСКИ =========
-@router.callback_query(F.data == "adm:users")
+@router.callback_query(F.data.in_({"adm:users", "usr:menu"}))
 async def users_menu(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.answer()
-    await _render(callback.message, "👥 <b>Пользователи и подписки</b>", users_menu_kb())
-
-
-@router.callback_query(F.data == "usr:menu")
-async def users_menu_back(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
     await _render(callback.message, "👥 <b>Пользователи и подписки</b>", users_menu_kb())
@@ -223,13 +211,23 @@ async def users_search(callback: CallbackQuery, state: FSMContext):
     await state.set_state(UserStates.search)
     await callback.answer()
     await callback.message.answer(
-        "🔍 Отправь <b>ID</b> юзера или его <b>@username</b>.\n\n<i>Отменить: /cancel</i>"
+        "🔍 Отправь <b>ID</b> юзера или его <b>@username</b>." + CANCEL_HINT,
+        reply_markup=back_kb("usr:menu"),
     )
 
 
 @router.message(UserStates.search)
 async def users_search_do(message: Message, state: FSMContext):
-    query = message.text.strip().lstrip("@")
+    query = (message.text or "").strip().lstrip("@")
+    if query == "-":
+        await state.clear()
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        await message.answer("👥 <b>Пользователи и подписки</b>", reply_markup=users_menu_kb())
+        return
+
     async with SessionMaker() as session:
         u = await session.get(User, int(query)) if query.isdigit() else None
         if not u:
@@ -255,14 +253,13 @@ async def grant_start(callback: CallbackQuery, state: FSMContext):
     await _render(
         callback.message,
         f"🎁 Выдаём подписку юзеру <code>{uid}</code>.\nВыбери тариф:",
-        await plan_kb(),
+        plan_kb(await get_plans()),
     )
 
 
 @router.callback_query(UserStates.grant, F.data.startswith("usr:plan:"))
 async def grant_apply(callback: CallbackQuery, state: FSMContext):
-    plan_key = callback.data.split(":")[2]
-    plan = await get_plan(plan_key)
+    plan = await get_plan(callback.data.split(":")[2])
     if not plan:
         await callback.answer("❌ Тариф не найден", show_alert=True)
         return
@@ -278,7 +275,7 @@ async def grant_apply(callback: CallbackQuery, state: FSMContext):
             .order_by(Subscription.expires_at.desc())
         )
         base = current.expires_at if current else now
-        expires = base + __import__("datetime").timedelta(days=plan.days)
+        expires = base + timedelta(days=plan.days)
         session.add(Subscription(user_id=uid, plan=plan.key, created_at=now, expires_at=expires))
         await session.commit()
 
@@ -316,24 +313,19 @@ async def _render_custom(msg: Message):
         f"⚙️ <b>Кастомизация (конфиг)</b>\n\n"
         f"✏️ Название: <b>{s.bot_name}</b>\n"
         f"💰 Базовые цены:\n{prices_lines}\n"
+        f"📱 Устройство: <b>{fmt_money(float(s.device_price_month))}₽/мес</b> · "
+        f"<b>{fmt_money(float(s.device_price_day))}₽/день</b>\n"
         f"📢 Канал: <b>{s.channel_url or '—'}</b>\n"
         f"👨‍💻 Поддержка: <b>{s.support_url or '—'}</b>\n"
-        f"🔔 Уведомления: <b>{s.logs_channel or '—'}</b>\n"
+        f"🔔 Уведомления: <b>{('ID ' + s.logs_channel) if s.logs_channel else 'Личные сообщения'}</b>\n"
         f"🕒 Часовой пояс: <b>{s.timezone_offset}</b>\n"
         f"🎁 Пробная подписка: <b>{trial}</b>",
         custom_menu_kb(s),
     )
 
 
-@router.callback_query(F.data == "adm:custom")
+@router.callback_query(F.data.in_({"adm:custom", "cus:back"}))
 async def admin_custom(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.answer()
-    await _render_custom(callback.message)
-
-
-@router.callback_query(F.data == "cus:back")
-async def cus_back(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
     await _render_custom(callback.message)
@@ -347,21 +339,7 @@ async def cus_stub(callback: CallbackQuery):
 async def _prompt(callback: CallbackQuery, state: FSMContext, new_state, text: str):
     await state.set_state(new_state)
     await callback.answer()
-    await callback.message.answer(f"{text}\n\n<i>Отменить: /cancel</i>")
-
-
-async def _save_text_field(message: Message, state: FSMContext, field: str, label: str, maxlen: int = 256):
-    value = message.text.strip()[:maxlen]
-    async with SessionMaker() as session:
-        s = await session.get(Settings, 1)
-        setattr(s, field, value)
-        await session.commit()
-    await state.clear()
-    try:
-        await message.delete()
-    except Exception:
-        pass
-    await message.answer(f"✅ {label}: <b>{value or '—'}</b>")
+    await callback.message.answer(text + CANCEL_HINT, reply_markup=back_kb("cus:back"))
 
 
 @router.callback_query(F.data == "cus:name")
@@ -378,54 +356,33 @@ async def cus_locations(callback: CallbackQuery, state: FSMContext):
     )
 
 
-@router.callback_query(F.data == "cus:channel")
-async def cus_channel(callback: CallbackQuery, state: FSMContext):
-    await _prompt(callback, state, CustomStates.channel, "📢 Отправь ссылку на канал (@username или https://t.me/...):")
-
-
-@router.callback_query(F.data == "cus:support")
-async def cus_support(callback: CallbackQuery, state: FSMContext):
-    await _prompt(callback, state, CustomStates.support, "👨‍💻 Отправь ссылку на поддержку:")
-
-
-@router.callback_query(F.data == "cus:logs")
-async def cus_logs(callback: CallbackQuery, state: FSMContext):
-    await _prompt(callback, state, CustomStates.logs, "🔕 Отправь ID канала уведомлений (-100...):")
-
-
-@router.callback_query(F.data == "cus:tz")
-async def cus_tz(callback: CallbackQuery, state: FSMContext):
-    await _prompt(callback, state, CustomStates.tz, "🕓 Отправь часовой пояс, например <code>UTC+03:00</code>:")
-
-
+# ---- название / локации / фото ----
 @router.message(CustomStates.name, F.text)
 async def save_name(message: Message, state: FSMContext):
+    if message.text.strip() == "-":
+        await state.clear()
+        return await _after_cancel_input(message)
     async with SessionMaker() as session:
         s = await session.get(Settings, 1)
         s.bot_name = message.text.strip()[:64]
         await session.commit()
         saved = s.bot_name
     await state.clear()
-    try:
-        await message.delete()
-    except Exception:
-        pass
-    await message.answer(f"✅ Название сохранено: <b>{saved}</b>")
+    await _delete_and_confirm(message, f"✅ Название сохранено: <b>{saved}</b>")
 
 
 @router.message(CustomStates.locations, F.text)
 async def save_locations(message: Message, state: FSMContext):
+    if message.text.strip() == "-":
+        await state.clear()
+        return await _after_cancel_input(message)
     async with SessionMaker() as session:
         s = await session.get(Settings, 1)
         s.locations = message.text.strip()
         await session.commit()
         count = len(s.locations.splitlines())
     await state.clear()
-    try:
-        await message.delete()
-    except Exception:
-        pass
-    await message.answer(f"✅ Локации сохранены ({count} шт.)")
+    await _delete_and_confirm(message, f"✅ Локации сохранены ({count} шт.)")
 
 
 @router.message(CustomStates.photo, F.photo)
@@ -439,95 +396,193 @@ async def save_photo(message: Message, state: FSMContext):
     await message.answer("✅ Фото сохранено, проверь /start")
 
 
-@router.message(CustomStates.channel, F.text)
-async def save_channel(message: Message, state: FSMContext):
-    await _save_text_field(message, state, "channel_url", "📢 Канал")
+# ---- ЦЕНЫ ----
+def _prices_overview(plans, s: Settings) -> str:
+    mins = "\n".join(
+        f"• {await_plan_name(key)} — {fmt_money(price)}₽"
+        for key, price in MIN_PRICES.items()
+    )
+    return (
+        f"💰 <b>Выберите тариф для изменения цены</b>\n\n"
+        f"<b>Минимальные суммы:</b>\n"
+        f"• 1 месяц — {fmt_money(MIN_PRICES['1m'])}₽\n"
+        f"• 3 месяца — {fmt_money(MIN_PRICES['3m'])}₽\n"
+        f"• 6 месяцев — {fmt_money(MIN_PRICES['6m'])}₽\n"
+        f"• 1 год — {fmt_money(MIN_PRICES['12m'])}₽\n"
+        f"• Устройство при покупке/продлении — "
+        f"{fmt_money(MIN_PRICES.get('dev_month', 0))}₽/мес (сейчас: {fmt_money(float(s.device_price_month))}₽)\n"
+        f"• Устройство при добавлении к активной — "
+        f"{fmt_money(MIN_PRICES.get('dev_day', 0))}₽/день (сейчас: {fmt_money(float(s.device_price_day))}₽)"
+    )
 
 
-@router.message(CustomStates.support, F.text)
-async def save_support(message: Message, state: FSMContext):
-    await _save_text_field(message, state, "support_url", "👨‍💻 Поддержка")
+async def _plan_name(key: str) -> str:
+    p = await get_plan(key)
+    return p.name if p else key
 
 
-@router.message(CustomStates.logs, F.text)
-async def save_logs(message: Message, state: FSMContext):
-    await _save_text_field(message, state, "logs_channel", "🔕 Уведомления", maxlen=64)
-
-
-@router.message(CustomStates.tz, F.text)
-async def save_tz(message: Message, state: FSMContext):
-    await _save_text_field(message, state, "timezone_offset", "🕓 Часовой пояс", maxlen=16)
-
-
-# ========= ЦЕНЫ =========
 @router.callback_query(F.data == "cus:prices")
 async def cus_prices(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    plans = await get_plans()
-    lines = "\n".join(f"• {p.name} — <b>{fmt_money(float(p.price))}₽</b>" for p in plans)
+    plans = [p for p in await get_plans() if p.key in MIN_PRICES]
+    s = await get_settings()
+    mins = (
+        f"<b>Минимальные суммы:</b>\n"
+        f"• 1 месяц — {fmt_money(MIN_PRICES['1m'])}₽\n"
+        f"• 3 месяца — {fmt_money(MIN_PRICES['3m'])}₽\n"
+        f"• 6 месяцев — {fmt_money(MIN_PRICES['6m'])}₽\n"
+        f"• 1 год — {fmt_money(MIN_PRICES['12m'])}₽\n"
+        f"• Устройство при покупке/продлении — {fmt_money(float(s.device_price_month))}₽/мес\n"
+        f"• Устройство при добавлении к активной — {fmt_money(float(s.device_price_day))}₽/день"
+    )
     await callback.answer()
     await _render(
         callback.message,
-        f"💰 <b>Базовые цены</b>\n\n{lines}\n\nВыбери тариф для изменения:",
-        await prices_menu_kb(),
+        f"💰 <b>Выберите тариф для изменения цены</b>\n\n{mins}",
+        prices_menu_kb(plans),
     )
 
 
 @router.callback_query(F.data.startswith("cus:price:"))
 async def cus_price(callback: CallbackQuery, state: FSMContext):
     key = callback.data.split(":")[2]
+
+    if key == "dev_month":
+        s = await get_settings()
+        await state.set_state(CustomStates.price)
+        await state.update_data(kind="dev_month")
+        await callback.answer()
+        await callback.message.answer(
+            f"📱 <b>Устройство при покупке/продлении</b>.\n"
+            f"Сейчас: <b>{fmt_money(float(s.device_price_month))}₽/мес</b>.\n"
+            f"Отправь новую цену в рублях за месяц:" + CANCEL_HINT,
+            reply_markup=back_kb("cus:back"),
+        )
+        return
+    if key == "dev_day":
+        s = await get_settings()
+        await state.set_state(CustomStates.price)
+        await state.update_data(kind="dev_day")
+        await callback.answer()
+        await callback.message.answer(
+            f"➕ <b>Устройство при добавлении к активной подписке</b>.\n"
+            f"Сейчас: <b>{fmt_money(float(s.device_price_day))}₽/день</b>.\n"
+            f"Отправь новую цену в рублях за день:" + CANCEL_HINT,
+            reply_markup=back_kb("cus:back"),
+        )
+        return
+
     plan = await get_plan(key)
     if not plan:
         await callback.answer("❌ Тариф не найден", show_alert=True)
         return
+    min_p = MIN_PRICES.get(key, 0)
     await state.set_state(CustomStates.price)
-    await state.update_data(plan_key=key)
+    await state.update_data(kind="plan", plan_key=key)
     await callback.answer()
     await callback.message.answer(
-        f"💰 Тариф <b>{plan.name}</b>.\nОтправь новую цену в рублях (просто число, например <code>250</code>):\n\n<i>Отменить: /cancel</i>"
+        f"💰 Тариф <b>{plan.name}</b>.\n"
+        f"Минимальная цена: <b>{fmt_money(min_p)}₽</b>.\n"
+        f"Отправь новую цену (просто число, например <code>{min_p}</code>):" + CANCEL_HINT,
+        reply_markup=back_kb("cus:back"),
     )
 
 
 @router.message(CustomStates.price, F.text)
 async def save_price(message: Message, state: FSMContext):
     raw = message.text.strip().replace("₽", "").replace(" ", "")
+    if raw == "-":
+        await state.clear()
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return await _after_cancel_input(message)
     if not raw.replace(".", "", 1).isdigit():
         await message.answer("⚠️ Нужна цена числом, например <code>250</code>. Попробуй ещё раз:")
         return
+    value = float(raw)
 
     data = await state.get_data()
-    async with SessionMaker() as session:
-        p = await session.get(Plan, data["plan_key"])
-        p.price = float(raw)
-        await session.commit()
-        name = p.name
-    await state.clear()
-    try:
-        await message.delete()
-    except Exception:
-        pass
+    kind = data.get("kind")
 
-    plans = await get_plans()
-    lines = "\n".join(f"• {pl.name} — <b>{fmt_money(float(pl.price))}₽</b>" for pl in plans)
-    await message.answer(
-        f"✅ Цена обновлена: <b>{name}</b>\n\n💰 <b>Базовые цены</b>\n{lines}",
-        reply_markup=await prices_menu_kb(),
+    if kind == "dev_month":
+        async with SessionMaker() as session:
+            s = await session.get(Settings, 1)
+            s.device_price_month = value
+            await session.commit()
+        label = f"📱 Устройство при покупке/продлении: <b>{fmt_money(value)}₽/мес</b>"
+    elif kind == "dev_day":
+        async with SessionMaker() as session:
+            s = await session.get(Settings, 1)
+            s.device_price_day = value
+            await session.commit()
+        label = f"➕ Устройство при добавлении к активной: <b>{fmt_money(value)}₽/день</b>"
+    else:
+        key = data["plan_key"]
+        min_p = MIN_PRICES.get(key, 0)
+        if value < min_p:
+            await message.answer(
+                f"⚠️ Минимальная цена для этого тарифа — <b>{fmt_money(min_p)}₽</b>.\nПопробуй ещё раз:"
+            )
+            return
+        async with SessionMaker() as session:
+            p = await session.get(Plan, key)
+            p.price = value
+            await session.commit()
+            label = f"✅ Цена обновлена: <b>{p.name}</b> — <b>{fmt_money(value)}₽</b>"
+
+    await state.clear()
+    await _delete_and_confirm(message, label)
+
+
+# ---- МАРКЕТИНГ ----
+def _marketing_text(s: Settings) -> str:
+    status = "Включены" if s.marketing_enabled else "Выключены"
+    return (
+        f"📨 <b>Маркетинговые сообщения</b>\n\n"
+        f"Статус: <b>{status}</b>\n\n"
+        f"Одноразовая скидка 20% на 1 месяц, действует 3 дня. Предложение отправляется через 3 дня "
+        f"после пробной подписки, если покупок не было, или через 7 дней после платной подписки.\n\n"
+        f"После включения отправка начинается через час, включая подходящих прежних пользователей. "
+        f"Выключение останавливает новые сообщения; отправленные предложения действуют до срока.\n\n"
+        f"<b>Предложение зарегистрировано:</b> 0\n"
+        f"<b>Покупки со скидкой:</b> 0\n"
+        f"<b>Срок предложения истёк:</b> 0\n"
+        f"<b>Доставка не подтверждена:</b> 0\n"
+        f"<b>Бот недоступен пользователю:</b> 0"
     )
 
 
-# ========= ПРОБНАЯ ПОДПИСКА =========
-def _trial_kb():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🔄 Вкл/Выкл", callback_data="cus:trial:toggle")
-    kb.button(text="✏️ Изменить дни", callback_data="cus:trial:days")
-    kb.button(text="⬅️ Назад", callback_data="cus:back")
-    kb.adjust(1)
-    return kb.as_markup()
+@router.callback_query(F.data == "cus:marketing")
+async def cus_marketing(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    s = await get_settings()
+    await callback.answer()
+    await _render(callback.message, _marketing_text(s), marketing_kb(s.marketing_enabled))
 
 
+@router.callback_query(F.data == "cus:marketing:toggle")
+async def cus_marketing_toggle(callback: CallbackQuery):
+    async with SessionMaker() as session:
+        s = await session.get(Settings, 1)
+        s.marketing_enabled = not s.marketing_enabled
+        await session.commit()
+        enabled = s.marketing_enabled
+    await callback.answer("✅ Включены" if enabled else "❌ Выключены", show_alert=True)
+    await _render(callback.message, _marketing_text(await get_settings()), marketing_kb(enabled))
+
+
+# ---- ПРОБНАЯ ПОДПИСКА ----
 def _trial_text(s: Settings) -> str:
-    status = f"включена, {s.trial_days} дн. · бесплатно" if s.trial_enabled else "выключена"
-    return f"🎁 <b>Пробная подписка</b>\n\nСтатус: <b>{status}</b>"
+    status = "Включена" if s.trial_enabled else "Выключена"
+    return (
+        f"🎁 <b>Пробная подписка</b>\n\n"
+        f"Цена: <b>Бесплатно</b>\n"
+        f"Статус: <b>{status}</b>\n"
+        f"Срок: <b>{s.trial_days} дн.</b>\n\n"
+        f"Выберите срок новых пробных подписок:"
+    )
 
 
 @router.callback_query(F.data == "cus:trial")
@@ -535,7 +590,7 @@ async def cus_trial(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     s = await get_settings()
     await callback.answer()
-    await _render(callback.message, _trial_text(s), _trial_kb())
+    await _render(callback.message, _trial_text(s), trial_kb(s.trial_enabled, s.trial_days))
 
 
 @router.callback_query(F.data == "cus:trial:toggle")
@@ -546,37 +601,156 @@ async def cus_trial_toggle(callback: CallbackQuery):
         await session.commit()
         enabled, days = s.trial_enabled, s.trial_days
     await callback.answer("✅ Включена" if enabled else "❌ Выключена", show_alert=True)
-    await _render(callback.message, _trial_text(await get_settings()), _trial_kb())
+    await _render(callback.message, _trial_text(await get_settings()), trial_kb(enabled, days))
 
 
-@router.callback_query(F.data == "cus:trial:days")
-async def cus_trial_days(callback: CallbackQuery, state: FSMContext):
-    await _prompt(callback, state, CustomStates.trial_days, "✏️ Отправь длительность пробной подписки в днях (число):")
-
-
-@router.message(CustomStates.trial_days, F.text)
-async def save_trial_days(message: Message, state: FSMContext):
-    raw = message.text.strip()
-    if not raw.isdigit() or not (1 <= int(raw) <= 30):
-        await message.answer("⚠️ Нужно число от 1 до 30. Попробуй ещё раз:")
-        return
+@router.callback_query(F.data.startswith("cus:trial:days:"))
+async def cus_trial_days(callback: CallbackQuery):
+    days = int(callback.data.split(":")[3])
     async with SessionMaker() as session:
         s = await session.get(Settings, 1)
-        s.trial_days = int(raw)
+        s.trial_days = days
+        await session.commit()
+    await callback.answer(f"✅ Срок: {days} дн.", show_alert=True)
+    await _render(callback.message, _trial_text(await get_settings()), trial_kb(True, days))
+
+
+# ---- КАНАЛ / ПОДДЕРЖКА / УВЕДОМЛЕНИЯ ----
+@router.callback_query(F.data == "cus:channel")
+async def cus_channel(callback: CallbackQuery, state: FSMContext):
+    s = await get_settings()
+    await state.set_state(CustomStates.channel)
+    await callback.answer()
+    await callback.message.answer(
+        f"📢 <b>Канал новостей</b>\n"
+        f"Текущая настройка: <b>{s.channel_url or '—'}</b>\n\n"
+        f"Отправьте ID канала, публичную или приватную ссылку, либо перешлите сообщение из канала. "
+        f"Для удаления отправьте <code>-</code>.\n\n"
+        f"<i>Не забудьте добавить вашего бота в админы канала!</i>" + CANCEL_HINT,
+        reply_markup=back_kb("cus:back"),
+    )
+
+
+@router.message(CustomStates.channel, F.text)
+async def save_channel_text(message: Message, state: FSMContext):
+    val = message.text.strip()
+    if val == "-":
+        val = ""
+    elif message.forward_from_chat:
+        val = str(message.forward_from_chat.id)
+    async with SessionMaker() as session:
+        s = await session.get(Settings, 1)
+        s.channel_url = val[:256]
         await session.commit()
     await state.clear()
-    try:
-        await message.delete()
-    except Exception:
-        pass
-    await message.answer(_trial_text(await get_settings()), reply_markup=_trial_kb())
+    await _delete_and_confirm(message, f"📢 Канал: <b>{val or '— (удалён)'}</b>")
 
 
-# ========= ТУМБЛЕРЫ =========
+@router.message(CustomStates.channel, F.forward_from_chat)
+async def save_channel_fwd(message: Message, state: FSMContext):
+    chat_id = str(message.forward_from_chat.id)
+    async with SessionMaker() as session:
+        s = await session.get(Settings, 1)
+        s.channel_url = chat_id
+        await session.commit()
+    await state.clear()
+    await _delete_and_confirm(message, f"📢 Канал: <b>{chat_id}</b>")
+
+
+@router.callback_query(F.data == "cus:support")
+async def cus_support(callback: CallbackQuery, state: FSMContext):
+    s = await get_settings()
+    await state.set_state(CustomStates.support)
+    await callback.answer()
+    await callback.message.answer(
+        f"👨‍💻 <b>Техподдержка</b>\n"
+        f"Текущая настройка: <b>{s.support_url or '—'}</b>\n\n"
+        f"Отправьте ссылку на поддержку. Для удаления отправьте <code>-</code>." + CANCEL_HINT,
+        reply_markup=back_kb("cus:back"),
+    )
+
+
+@router.message(CustomStates.support, F.text)
+async def save_support(message: Message, state: FSMContext):
+    val = message.text.strip()
+    if val == "-":
+        val = ""
+    async with SessionMaker() as session:
+        s = await session.get(Settings, 1)
+        s.support_url = val[:256]
+        await session.commit()
+    await state.clear()
+    await _delete_and_confirm(message, f"👨‍💻 Поддержка: <b>{val or '— (удалена)'}</b>")
+
+
+@router.callback_query(F.data == "cus:logs")
+async def cus_logs(callback: CallbackQuery, state: FSMContext):
+    s = await get_settings()
+    await state.set_state(CustomStates.logs)
+    await callback.answer()
+    current = f"ID {s.logs_channel}" if s.logs_channel else "Личные сообщения бота"
+    await callback.message.answer(
+        f"🔔 <b>Канал уведомлений</b>\n"
+        f"Текущая настройка: <b>{current}</b>\n\n"
+        f"Отправьте новый ID канала/группы (например: <code>-100123456789</code>).\n"
+        f"Или отправьте <code>0</code>, чтобы получать уведомления в личные сообщения этого бота.\n"
+        f"Для удаления отправьте <code>-</code>." + CANCEL_HINT,
+        reply_markup=back_kb("cus:back"),
+    )
+
+
+@router.message(CustomStates.logs, F.text)
+async def save_logs(message: Message, state: FSMContext):
+    raw = message.text.strip()
+    if raw == "-":
+        val = ""
+    elif raw == "0":
+        val = ""  # 0 = ЛС
+    else:
+        val = raw
+    async with SessionMaker() as session:
+        s = await session.get(Settings, 1)
+        s.logs_channel = val[:64]
+        await session.commit()
+    await state.clear()
+    current = f"ID {val}" if val else "Личные сообщения"
+    await _delete_and_confirm(message, f"🔔 Уведомления: <b>{current}</b>")
+
+
+# ---- ЧАСОВОЙ ПОЯС ----
+@router.callback_query(F.data == "cus:tz")
+async def cus_tz(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    s = await get_settings()
+    await callback.answer()
+    await _render(
+        callback.message,
+        f"🕓 <b>Текущий часовой пояс: {s.timezone_offset}</b>\n\nВыберите ваш часовой пояс:",
+        tz_kb(s.timezone_offset),
+    )
+
+
+@router.callback_query(F.data.startswith("cus:tz:"))
+async def cus_tz_set(callback: CallbackQuery):
+    h = int(callback.data.split(":")[2])
+    label = f"UTC{h:+03d}:00"
+    async with SessionMaker() as session:
+        s = await session.get(Settings, 1)
+        s.timezone_offset = label
+        await session.commit()
+    await callback.answer(f"✅ {label}", show_alert=True)
+    await _render(
+        callback.message,
+        f"🕓 <b>Текущий часовой пояс: {label}</b>\n\nВыберите ваш часовой пояс:",
+        tz_kb(label),
+    )
+
+
+# ---- ТУМБЛЕРЫ ----
 @router.callback_query(F.data.startswith("cus:tgl:"))
 async def cus_toggle(callback: CallbackQuery):
     field = callback.data.split(":")[2]
-    allowed = {"roulette_enabled", "gifts_enabled", "marketing_enabled"}
+    allowed = {"roulette_enabled", "gifts_enabled"}
     if field not in allowed:
         await callback.answer("⛔ Недоступно", show_alert=True)
         return
@@ -588,14 +762,54 @@ async def cus_toggle(callback: CallbackQuery):
     await _render_custom(callback.message)
 
 
+# ---- хелперы ----
+async def _after_cancel_input(message: Message):
+    """После '-' в FSM — показываем кастомизацию заново."""
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    await message.answer("✅ Отменено.")
+    s = await get_settings()
+    plans = await get_plans()
+    prices_lines = "\n".join(f"• {p.name} — {fmt_money(float(p.price))}₽" for p in plans)
+    trial = f"включена, {s.trial_days} дн." if s.trial_enabled else "выключена"
+    await message.answer(
+        f"⚙️ <b>Кастомизация (конфиг)</b>\n\n"
+        f"✏️ Название: <b>{s.bot_name}</b>\n"
+        f"💰 Базовые цены:\n{prices_lines}\n"
+        f"🎁 Пробная подписка: <b>{trial}</b>",
+        reply_markup=custom_menu_kb(s),
+    )
+
+
+async def _delete_and_confirm(message: Message, text: str):
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    await message.answer(text)
+
+
 # ========= РАССЫЛКА =========
 @router.callback_query(F.data == "adm:broadcast")
 async def bc_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(BroadcastStates.waiting)
     await callback.answer()
     await callback.message.answer(
-        "📢 Отправь сообщение для рассылки — текст, фото, видео, что угодно.\n\n<i>Отменить: /cancel</i>"
+        "📢 Отправь сообщение для рассылки — текст, фото, видео, что угодно." + CANCEL_HINT,
+        reply_markup=back_kb("adm:main"),
     )
+
+
+@router.message(BroadcastStates.waiting, F.text == "-")
+async def bc_cancel_input(message: Message, state: FSMContext):
+    await state.clear()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    await message.answer("✅ Отменено.", reply_markup=admin_main_kb())
 
 
 @router.message(BroadcastStates.waiting)
@@ -668,7 +882,7 @@ async def _users_count() -> int:
         ) or 0
 
 
-# ========= /cancel =========
+# ========= /cancel (оставил как запасной путь) =========
 @router.message(F.text == "/cancel")
 async def cancel(message: Message, state: FSMContext):
     await state.clear()

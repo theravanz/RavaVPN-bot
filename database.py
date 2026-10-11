@@ -46,6 +46,10 @@ class Settings(Base):
     gifts_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     marketing_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # доп. устройство
+    device_price_month: Mapped[float] = mapped_column(Numeric(10, 2), default=25)  # при покупке/продлении
+    device_price_day: Mapped[float] = mapped_column(Numeric(10, 2), default=1)     # добавление к активной
+
 
 # ========= ТАРИФЫ (теперь в БД — цены правятся из админки) =========
 class Plan(Base):
@@ -59,13 +63,16 @@ class Plan(Base):
     sort: Mapped[int] = mapped_column(default=0)
 
 
+# минимальные цены — константы, админ не может поставить ниже
+MIN_PRICES = {"1m": 250, "3m": 650, "6m": 1150, "12m": 2000}
+
 DEFAULT_PLANS = [
-    ("1d",  "1 день",    1,   49.0,  0),
-    ("3d",  "3 дня",     3,   99.0,  1),
-    ("1m",  "1 месяц",   30,  250.0, 2),
-    ("3m",  "3 месяца",  90,  650.0, 3),
-    ("6m",  "6 месяцев", 180, 1250.0, 4),
-    ("12m", "1 год",     365, 2500.0, 5),
+    ("1d",  "1 день",    1,   49.0,   0, False),  # приз рулетки, не продаётся
+    ("3d",  "3 дня",     3,   99.0,   1, False),  # триал новичкам, не продаётся
+    ("1m",  "1 месяц",   30,  250.0,  2, True),
+    ("3m",  "3 месяца",  90,  650.0,  3, True),
+    ("6m",  "6 месяцев", 180, 1250.0, 4, True),
+    ("12m", "1 год",     365, 2500.0, 5, True),
 ]
 
 
@@ -129,6 +136,8 @@ def _add_missing_columns(sync_conn):
         "roulette_enabled": "Boolean NOT NULL DEFAULT True",
         "gifts_enabled": "Boolean NOT NULL DEFAULT False",
         "marketing_enabled": "Boolean NOT NULL DEFAULT False",
+        "device_price_month": "Numeric(10,2) NOT NULL DEFAULT 25",
+        "device_price_day": "Numeric(10,2) NOT NULL DEFAULT 1",
     }
     for name, ddl in settings_new.items():
         if name not in scols:
@@ -144,9 +153,12 @@ async def init_db():
         if not await session.get(Settings, 1):
             session.add(Settings(id=1))
         # сидируем тарифы при первом запуске
-        for key, name, days, price, sort in DEFAULT_PLANS:
-            if not await session.get(Plan, key):
-                session.add(Plan(key=key, name=name, days=days, price=price, sort=sort))
+        for key, name, days, price, sort, active in DEFAULT_PLANS:
+            p = await session.get(Plan, key)
+            if not p:
+                session.add(Plan(key=key, name=name, days=days, price=price, sort=sort, is_active=active))
+            else:
+                p.is_active = active  # пока нет UI для активности — держим в синхроне
         await session.commit()
 
 
