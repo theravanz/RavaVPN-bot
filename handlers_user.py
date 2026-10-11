@@ -21,7 +21,7 @@ SECTION_NAMES = {
 
 async def send_main_menu(message: Message):
     s = await get_settings()
-    kb = main_menu_keyboard()
+    kb = main_menu_keyboard(s) 
 
     if s.main_menu_photo_id:
         try:
