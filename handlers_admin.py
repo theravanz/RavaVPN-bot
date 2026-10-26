@@ -9,6 +9,7 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import func, select
 
+from config import settings
 from database import (
     MIN_PRICES, Payment, Plan, SessionMaker, Settings, Subscription, User,
     _utcnow, fmt_money, get_admin_summary, get_plan, get_plans,
