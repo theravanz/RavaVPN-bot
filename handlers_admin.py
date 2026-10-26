@@ -50,11 +50,20 @@ CANCEL_HINT = "\n\n<i>Для отмены отправьте -</i>"
 
 
 # ========= ШАПКА ПАНЕЛИ =========
+MODES = [
+    ("hybrid", "🔀 Гибрид — бот и сайт работают вместе"),
+    ("assistant", "🌐 Помощник сайту — только вход по коду"),
+    ("autonomous", "🤖 Автономный — сайт не участвует"),
+]
+
+
 async def _panel_text() -> str:
     s = await get_settings()
     st = await get_admin_summary()
+    mode_label = dict(MODES).get(getattr(s, "bot_mode", "hybrid"), "hybrid")
     return (
         f"🛠 <b>Панель управления франшизой {s.bot_name}</b>\n\n"
+        f"🧭 <b>Режим работы:</b> {mode_label}\n\n"
         f"📊 <b>Статистика:</b>\n"
         f"👥 Пользователей: <b>{st['total']}</b> (+{st['new_today']})\n"
         f"💎 Активных подписок: <b>{st['subs_active']}</b>\n"
@@ -107,6 +116,24 @@ async def stub_sections(callback: CallbackQuery):
 
 
 # ========= СТАТИСТИКА =========
+@router.callback_query(F.data == "adm:mode")
+async def admin_mode_cycle(callback: CallbackQuery):
+    """Циклическое переключение режима работы бота."""
+    s = await get_settings()
+    current = getattr(s, "bot_mode", "hybrid")
+    idx = next((i for i, (k, _) in enumerate(MODES) if k == current), 0)
+    new_key, new_label = MODES[(idx + 1) % len(MODES)]
+
+    async with SessionMaker() as session:
+        st = await session.get(Settings, 1)
+        if st:
+            st.bot_mode = new_key
+            await session.commit()
+
+    await callback.answer(f"Режим: {new_label}", show_alert=True)
+    await _render(callback.message, await _panel_text(), admin_main_kb())
+
+
 @router.callback_query(F.data == "adm:stats")
 async def admin_stats(callback: CallbackQuery):
     st = await get_stats()

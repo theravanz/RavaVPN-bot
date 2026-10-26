@@ -22,6 +22,25 @@ router = Router()
 
 AUTH_CODE_RE = re.compile(r"^[0-9a-f]{48}$")  # randomBytes(24) от сайта
 
+
+async def _assistant_guard(callback: CallbackQuery) -> bool:
+    """В режиме «помощник сайту» эти разделы доступны только на сайте."""
+    s = await get_settings()
+    if getattr(s, "bot_mode", "hybrid") != "assistant":
+        return False
+    kb = InlineKeyboardBuilder()
+    from keyboards import _site_url
+    kb.button(text="🌐 Открыть на сайте", url=_site_url())
+    kb.adjust(1)
+    await callback.message.answer(
+        text=(
+            "🌐 Бот сейчас работает <b>как помощник сайта</b>: здесь только вход по коду.\n"
+            "Этот раздел доступен в личном кабинете на сайте 👇"
+        ),
+        reply_markup=kb.as_markup(),
+    )
+    return True
+
 TG_SUPPORT_URL = "https://t.me/ravavpnhelp"
 TG_SUPPORT_LABEL = "Написать в поддержку"
 
@@ -112,6 +131,8 @@ async def handle_referral_start(message: Message, ref_code: str):
 async def referral_menu(callback: CallbackQuery):
     """Реферальная программа: код и баланс из локального кэша, статистика — best-effort с сайта."""
     await callback.answer()
+    if await _assistant_guard(callback):
+        return
     tg_id = callback.from_user.id
 
     # Единый источник истины — сайт: берём его код, локальный только как запасной
@@ -179,6 +200,8 @@ async def _kb_plans():
 @router.callback_query(F.data == "menu:subscribe")
 async def subscribe_menu(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
+    if await _assistant_guard(callback):
+        return
     await state.clear()
     s = await get_settings()
     await callback.message.answer(
@@ -361,6 +384,8 @@ async def buy_noop(callback: CallbackQuery):
 @router.callback_query(F.data == "menu:promo")
 async def promo_menu(callback: CallbackQuery):
     await callback.answer()
+    if await _assistant_guard(callback):
+        return
     kb = InlineKeyboardBuilder()
     kb.button(text="💎 К тарифам", callback_data="menu:subscribe")
     kb.button(text=f"💬 {TG_SUPPORT_LABEL}", url=TG_SUPPORT_URL)

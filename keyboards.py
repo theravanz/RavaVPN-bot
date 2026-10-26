@@ -4,8 +4,19 @@ from database import Settings
 
 
 # ========= ЮЗЕРСКОЕ МЕНЮ =========
+MODE_ASSISTANT = "assistant"  # бот — только помощник сайту: авторизация и ссылки
+
+
 def main_menu_keyboard(s: Settings):
     kb = InlineKeyboardBuilder()
+
+    if getattr(s, "bot_mode", "hybrid") == MODE_ASSISTANT:
+        # режим «помощник сайту»: вся функциональность — на сайте
+        kb.button(text="🌐 Открыть личный кабинет", url=_site_url())
+        kb.button(text="ℹ️ INFO", callback_data="menu:info")
+        kb.adjust(1)
+        return kb.as_markup()
+
     kb.button(text="💎 Подписка", callback_data="menu:subscribe")
     kb.button(text="👥 Реф. программа", callback_data="menu:referral")
     if s.roulette_enabled:
@@ -18,10 +29,19 @@ def main_menu_keyboard(s: Settings):
     return kb.as_markup()
 
 
+def _site_url() -> str:
+    from config import settings
+    url = settings.web_api_url
+    if "localhost" in url:
+        return "https://ravavpn.vercel.app"
+    return url
+
+
 # ========= АДМИНКА =========
 def admin_main_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="📊 Статистика", callback_data="adm:stats")
+    kb.button(text="🧭 Режим работы бота", callback_data="adm:mode")
     kb.button(text="⚙️ Кастомизация (конфиг)", callback_data="adm:custom")
     kb.button(text="👥 Работа с пользователями и подписками", callback_data="adm:users")
     kb.button(text="🏦 Вывод средств", callback_data="adm:withdraw")
