@@ -10,6 +10,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import settings
 from database import (
+    SessionMaker, User,
     attach_referral, ensure_referral_code, find_user_by_ref_code,
     get_plan, get_plans, get_settings, get_user, upsert_user,
 )
@@ -113,14 +114,26 @@ async def referral_menu(callback: CallbackQuery):
     await callback.answer()
     tg_id = callback.from_user.id
 
-    code = await ensure_referral_code(tg_id, callback.from_user.username)
+    # Единый источник истины — сайт: берём его код, локальный только как запасной
+    stats = await fetch_web_stats(tg_id)
+    if stats:
+        code = stats["refCode"]
+        # сохраняем сайт-код в локальное зеркало, чтобы он же ушёл в пригласительные события
+        await ensure_referral_code(tg_id, callback.from_user.username)
+        async with SessionMaker() as session:
+            u2 = await session.get(User, tg_id)
+            if u2 and u2.referral_code != code:
+                u2.referral_code = code
+                await session.commit()
+    else:
+        code = await ensure_referral_code(tg_id, callback.from_user.username)
+
     bot_link = f"https://t.me/{settings.bot_username}?start={code}"
     u = await get_user(tg_id)
 
     balance = float(u.referral_balance or 0) if u else 0.0
     invited_note = ""
 
-    stats = await fetch_web_stats(tg_id)
     if stats:
         balance = stats["balance"] / 100
         invited_note = f"\n👥 Приглашено: <b>{stats['invited']}</b> · оплатили: <b>{stats['connected']}</b>"
