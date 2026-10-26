@@ -17,7 +17,7 @@ from web_client import fetch_web_stats, web_post
 
 router = Router()
 
-AUTH_CODE_RE = re.compile(r"^[0-9a-f]{24}$")
+AUTH_CODE_RE = re.compile(r"^[0-9a-f]{48}$")  # randomBytes(24) от сайта
 
 SECTION_NAMES = {
     "subscribe": "Подписка",
