@@ -169,6 +169,7 @@ def _add_missing_columns(sync_conn):
         "marketing_enabled": "Boolean NOT NULL DEFAULT False",
         "device_price_month": "Numeric(10,2) NOT NULL DEFAULT 25",
         "device_price_day": "Numeric(10,2) NOT NULL DEFAULT 1",
+        "bot_mode": "VARCHAR(16) NOT NULL DEFAULT 'hybrid'",
     }
     for name, ddl in settings_new.items():
         if name not in scols:
