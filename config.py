@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     bot_token: str
     admin_ids: str = ""
     database_url: str = "sqlite+aiosqlite:///./bot.db"
+    web_api_url: str = "http://localhost:3000"
+    telegram_auth_secret: str = ""
 
 
 settings = Settings()
