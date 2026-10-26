@@ -146,7 +146,7 @@ def _add_missing_columns(sync_conn):
             "ALTER TABLE users ADD COLUMN is_banned Boolean NOT NULL DEFAULT False"
         ))
     users_new = {
-        "invited_by": "BigInteger NULL",
+        "invited_by": "BIGINT NULL",
         "referral_code": "VARCHAR(32) NULL",
         "referral_balance": "Numeric(10,2) NOT NULL DEFAULT 0",
         "referral_spent": "Numeric(10,2) NOT NULL DEFAULT 0",
