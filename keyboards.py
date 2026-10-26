@@ -49,6 +49,7 @@ def admin_main_kb():
     kb.button(text="🎲 Доп. функции", callback_data="adm:extra")
     kb.button(text="📨 Рассылка", callback_data="adm:broadcast")
     kb.button(text="📈 UTM Метки", callback_data="adm:utm")
+    kb.button(text="🌐 Веб-панель сайта", callback_data="adm:webpanel")
     kb.button(text="➡️ В меню бота", callback_data="adm:exit")
     kb.adjust(1)
     return kb.as_markup()

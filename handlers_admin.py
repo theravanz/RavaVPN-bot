@@ -1,6 +1,7 @@
 import asyncio
 from datetime import timedelta
 
+import aiohttp
 from aiogram import Bot, Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -45,7 +46,6 @@ class UserStates(StatesGroup):
     grant = State()
 
 
-ADMIN_PANEL_URL = "https://dashboard.render.com"
 CANCEL_HINT = "\n\n<i>Для отмены отправьте -</i>"
 
 
@@ -69,8 +69,8 @@ async def _panel_text() -> str:
         f"💎 Активных подписок: <b>{st['subs_active']}</b>\n"
         f"💰 Оборот бота: <b>{fmt_money(st['turnover'])} ₽</b>\n"
         f"🛒 Продаж сегодня: <b>{fmt_money(st['sales_today'])} ₽</b>\n\n"
-        f"💰 <b>ВАШ БАЛАНС:</b> <b>{fmt_money(float(s.balance))} ₽</b>\n"
-        f'🔗 <a href="{ADMIN_PANEL_URL}">Доступ в веб-панель</a>'
+        f"💰 <b>ВАШ БАЛАНС:</b> <b>{fmt_money(float(s.balance))} ₽</b>\n\n"
+        f"🌐 Веб-панель сайта — кнопка ниже 👇"
     )
 
 
@@ -132,6 +132,34 @@ async def admin_mode_cycle(callback: CallbackQuery):
 
     await callback.answer(f"Режим: {new_label}", show_alert=True)
     await _render(callback.message, await _panel_text(), admin_main_kb())
+
+
+@router.callback_query(F.data.in_({"adm:webpanel", "adm:webpanel_reset"}))
+async def admin_webpanel(callback: CallbackQuery):
+    """Секретная ссылка веб-панели: показать или сбросить (через сайт)."""
+    reset = callback.data.endswith("_reset")
+    api = f"{settings.web_api_url}/api/admin/link{'?reset=1' if reset else ''}"
+    headers = {"x-bot-secret": settings.telegram_auth_secret, "Content-Type": "application/json"}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.post(api, json={}, headers=headers) as resp:
+                data = await resp.json()
+                if resp.status == 200 and data.get("url"):
+                    text = (
+                        "♻️ Ссылка <b>сброшена</b> — старая больше не работает.\n\n"
+                        f"🔗 Новая веб-панель:\n<code>{data['url']}</code>\n\n"
+                        "Держите адрес в тайне и не пересылайте никому."
+                        if reset else
+                        "🔗 <b>Веб-панель сайта</b> (статистика, участники, бонусы):\n"
+                        f"<code>{data['url']}</code>\n\n"
+                        "Держите адрес в тайне. Сбросить можно здесь же или в самой панели."
+                    )
+                    await _render(callback.message, text, admin_main_kb())
+                else:
+                    await callback.answer(f"Сайт: {data.get('error', resp.status)}", show_alert=True)
+    except Exception as e:
+        await callback.answer(f"Сайт недоступен: {e}", show_alert=True)
+    await callback.answer()
 
 
 @router.callback_query(F.data == "adm:stats")
