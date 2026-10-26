@@ -50,6 +50,9 @@ class Settings(Base):
     device_price_month: Mapped[float] = mapped_column(Numeric(10, 2), default=25)  # при покупке/продлении
     device_price_day: Mapped[float] = mapped_column(Numeric(10, 2), default=1)     # добавление к активной
 
+    # режим работы: autonomous | online | hybrid
+    bot_mode: Mapped[str] = mapped_column(String(16), default="hybrid")
+
 
 # ========= ТАРИФЫ (теперь в БД — цены правятся из админки) =========
 class Plan(Base):
@@ -88,6 +91,25 @@ class User(Base):
         DateTime, server_default=func.now(), onupdate=func.now()
     )
 
+    # рефералы: кто пригласил (tg_id пригласившего) и локальное зеркало
+    # партнёрского баланса (источник истины — сайт, кэш — для чата и
+    # покупок в автономном режиме)
+    invited_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    referral_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    referral_balance: Mapped[float] = mapped_column(Numeric(10, 2), default=0)
+    referral_spent: Mapped[float] = mapped_column(Numeric(10, 2), default=0)
+
+
+# ========= OUTBOX: события для сайта при недоступности =========
+class OutboxEvent(Base):
+    __tablename__ = "outbox_events"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)  # eventId
+    kind: Mapped[str] = mapped_column(String(32))  # referral_attach | referral_reward | referral_spend
+    payload_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
 
 # ========= ПОДПИСКИ / ПЛАТЕЖИ =========
 class Subscription(Base):
@@ -123,6 +145,15 @@ def _add_missing_columns(sync_conn):
         sync_conn.execute(text(
             "ALTER TABLE users ADD COLUMN is_banned Boolean NOT NULL DEFAULT False"
         ))
+    users_new = {
+        "invited_by": "BigInteger NULL",
+        "referral_code": "VARCHAR(32) NULL",
+        "referral_balance": "Numeric(10,2) NOT NULL DEFAULT 0",
+        "referral_spent": "Numeric(10,2) NOT NULL DEFAULT 0",
+    }
+    for name, ddl in users_new.items():
+        if name not in ucols:
+            sync_conn.execute(text(f"ALTER TABLE users ADD COLUMN {name} {ddl}"))
 
     scols = {c["name"] for c in insp.get_columns("settings")}
     settings_new = {
@@ -193,6 +224,103 @@ async def is_user_banned(tg_id: int) -> bool:
     async with SessionMaker() as session:
         u = await session.get(User, tg_id)
         return bool(u and u.is_banned)
+
+
+# ========= РЕФЕРАЛЫ =========
+REF_CODE_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+
+def _gen_ref_code() -> str:
+    import random
+    return "ref_" + "".join(random.choice(REF_CODE_ALPHABET) for _ in range(8))
+
+
+async def ensure_referral_code(tg_id: int, username: str | None) -> str:
+    """Гарантирует реферальный код пользователя (локально, лениво)."""
+    async with SessionMaker() as session:
+        u = await session.get(User, tg_id)
+        if not u:
+            u = User(id=tg_id, username=username)
+            session.add(u)
+        if not u.referral_code:
+            u.referral_code = _gen_ref_code()
+        await session.commit()
+        return u.referral_code
+
+
+async def get_user(tg_id: int) -> User | None:
+    async with SessionMaker() as session:
+        return await session.get(User, tg_id)
+
+
+async def find_user_by_ref_code(code: str) -> User | None:
+    async with SessionMaker() as session:
+        return (await session.scalars(select(User).where(User.referral_code == code))).first()
+
+
+async def attach_referral(invited_tg_id: int, username: str | None, inviter_tg_id: int) -> bool:
+    """Локальная привязка «кто кого пригласил». True — привязали впервые."""
+    if invited_tg_id == inviter_tg_id:
+        return False
+    async with SessionMaker() as session:
+        u = await session.get(User, invited_tg_id)
+        if not u:
+            u = User(id=invited_tg_id, username=username)
+            session.add(u)
+        if u.invited_by:
+            return False  # уже приглашён кем-то — не перезаписываем
+        u.invited_by = inviter_tg_id
+        await session.commit()
+        return True
+
+
+async def mirror_reward(inviter_tg_id: int, amount: float):
+    """Локальное зеркало начисления 40% (источник истины — сайт)."""
+    async with SessionMaker() as session:
+        u = await session.get(User, inviter_tg_id)
+        if u:
+            u.referral_balance = (u.referral_balance or 0) + amount
+            await session.commit()
+
+
+async def mirror_spend(tg_id: int, amount: float) -> bool:
+    """Локальное списание баланса на покупку. False — не хватает."""
+    async with SessionMaker() as session:
+        u = await session.get(User, tg_id)
+        if not u or (u.referral_balance or 0) < amount:
+            return False
+        u.referral_balance = (u.referral_balance or 0) - amount
+        u.referral_spent = (u.referral_spent or 0) + amount
+        await session.commit()
+        return True
+
+
+async def report_referral_reward(payer_tg_id: int, amount_rub: float, payment_note: str = "") -> float:
+    """
+    Вызывается из места, где фиксируется реальный платёж приглашённого.
+    Начисляет пригласившему 40% локально (мгновенно видит в чате) и
+    кладёт событие на сайт через outbox. Возвращает сумму начисления.
+    """
+    payer = await get_user(payer_tg_id)
+    if not payer or not payer.invited_by:
+        return 0.0
+
+    inviter_id = payer.invited_by
+    reward = round(amount_rub * 0.4, 2)
+    await mirror_reward(inviter_id, reward)
+
+    from web_client import web_post
+    await web_post(
+        "referral_reward",
+        "/api/referrals/event",
+        {
+            "tgId": str(payer_tg_id),
+            "fromTgId": str(inviter_id),
+            "amount": int(round(amount_rub * 100)),  # сайт считает 40% сам
+            "note": payment_note,
+        },
+    )
+    return reward
 
 
 # ========= СВОДКА ДЛЯ ШАПКИ АДМИНКИ =========

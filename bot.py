@@ -13,6 +13,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiogram.types import LinkPreviewOptions
 
 from database import init_db
+from web_client import outbox_worker
 from handlers_admin import router as admin_router
 from handlers_user import router as user_router
 
@@ -50,6 +51,9 @@ async def on_startup(bot: Bot):
     logging.info("🗄 Подключаюсь к БД...")
     await init_db()
     logging.info("🗄 БД готова")
+
+    # фоновая доставка outbox-событий на сайт (не блокирует запуск)
+    asyncio.create_task(outbox_worker())
 
     if WEBHOOK_URL:
         await bot.set_webhook(

@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./bot.db"
     web_api_url: str = "http://localhost:3000"
     telegram_auth_secret: str = ""
+    bot_username: str = "RavaVPN_bot"  # для реферальных deep-link'ов
 
 
 settings = Settings()
