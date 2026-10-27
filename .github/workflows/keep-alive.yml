@@ -1,0 +1,28 @@
+# Keep-alive для Render free tier: пингует healthcheck каждые 5 минут,
+# чтобы сервис не засыпал и бот отвечал без холодного старта (~50 сек).
+# Нюанс: free tier даёт 750 часов/месяц на инстанс — один всегда-включённый
+# сервис укладывается в лимит (720 ч).
+name: Keep alive
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping bot healthcheck
+        run: |
+          URL="${{ secrets.KEEP_ALIVE_URL }}"
+          if [ -z "$URL" ]; then
+            echo "KEEP_ALIVE_URL not set, skipping"
+            exit 0
+          fi
+          for i in 1 2 3; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "$URL") && [ "$code" = "200" ] && echo "OK: $code" && exit 0
+            echo "attempt $i failed ($code), retrying in 10s"; sleep 10
+          done
+          echo "healthcheck unreachable"
+          exit 1
