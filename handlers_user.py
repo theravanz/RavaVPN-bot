@@ -23,6 +23,31 @@ router = Router()
 AUTH_CODE_RE = re.compile(r"^[0-9a-f]{48}$")  # randomBytes(24) от сайта
 
 
+async def _swap(callback: CallbackQuery, text: str, kb=None):
+    """Заменить сообщение, с которым взаимодействовали: правим на месте,
+    если не вышло (фото и т.п.) — удаляем старое и шлём новое."""
+    m = callback.message
+    if m and m.from_user and m.from_user.is_bot:
+        try:
+            await m.edit_text(text, reply_markup=kb)
+            return
+        except Exception:
+            pass
+    if m:
+        try:
+            await m.delete()
+        except Exception:
+            pass
+    await callback.message.answer(text, reply_markup=kb)
+
+
+def _back_to_menu_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="↩️ Главное меню", callback_data="menu:back")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 async def _assistant_guard(callback: CallbackQuery) -> bool:
     """В режиме «помощник сайту» эти разделы доступны только на сайте."""
     s = await get_settings()
@@ -161,7 +186,8 @@ async def referral_menu(callback: CallbackQuery):
     else:
         invited_note = "\n👥 Статистика появится, когда сайт будет на связи."
 
-    await callback.message.answer(
+    await _swap(
+        callback,
         text=(
             "👥 <b>Реферальная программа</b>\n\n"
             f"Приглашайте друзей — вы получаете <b>40%</b> от каждого их платежа на партнёрский баланс.\n\n"
@@ -170,7 +196,7 @@ async def referral_menu(callback: CallbackQuery):
             f"💰 Баланс: <b>{balance:,.2f} ₽</b>\n\n"
             "Балансом можно оплатить подписку или подарок — при покупке он применится автоматически."
         ),
-        reply_markup=main_menu_keyboard(await get_settings()),
+        kb=_back_to_menu_kb(),
     )
 
 
@@ -203,14 +229,14 @@ async def subscribe_menu(callback: CallbackQuery, state: FSMContext):
     if await _assistant_guard(callback):
         return
     await state.clear()
-    s = await get_settings()
-    await callback.message.answer(
+    await _swap(
+        callback,
         text=(
             "💎 <b>Оформление подписки</b>\n\n"
             "Покупка доступна от одного месяца. Трафик — <b>безлимитный</b>.\n\n"
             "<b>Шаг 1 из 3</b> — выберите тариф:"
         ),
-        reply_markup=await _kb_plans(),
+        kb=await _kb_plans(),
     )
 
 
@@ -284,6 +310,7 @@ async def buy_promo_step(callback: CallbackQuery, state: FSMContext):
         ),
         reply_markup=kb.as_markup(),
     )
+    await state.update_data(step_msg=callback.message.message_id)
 
 
 @router.message(BuyFSM.promo, F.text)
@@ -292,6 +319,12 @@ async def buy_promo_input(message: Message, state: FSMContext):
     data = await state.get_data()
     key, n = data["plan_key"], data["devices"]
     plan = await get_plan(key)
+
+    # подчищаем сообщение шага с промокодом
+    try:
+        await message.bot.delete_message(message.chat.id, data.get("step_msg"))
+    except Exception:
+        pass
 
     # Бэкенда промокодов пока нет — фиксируем код, применить сможет оператор при оплате
     await state.update_data(promo=promo)
@@ -315,7 +348,7 @@ async def _show_payment_step(msg_for: Message, state: FSMContext, plan, n: int, 
     kb.button(text="✅ К оплате", callback_data="buy:checkout")
     kb.adjust(1)
     promo_line = f"\n🎟 Промокод: <code>{promo}</code>" if promo else ""
-    await msg_for.answer(
+    sent = await msg_for.answer(
         text=(
             f"💳 <b>Способ оплаты</b>\n\n"
             f"Тариф «{plan.name}» · {n} устройств{promo_line}\n\n"
@@ -323,17 +356,31 @@ async def _show_payment_step(msg_for: Message, state: FSMContext, plan, n: int, 
         ),
         reply_markup=kb.as_markup(),
     )
+    await state.update_data(payment_msg=sent.message_id)
 
 
 @router.callback_query(F.data.startswith("buy:pay:"))
 async def buy_payment_pick(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     pid = callback.data.split(":")[2]
-    label = dict(PAYMENT_METHODS).get(pid, pid)
+    data = await state.get_data()
     await state.update_data(payment=pid)
-    await callback.message.answer(
-        text=f"Выбрано: <b>{label}</b>. Нажмите «✅ К оплате», когда будете готовы.",
-    )
+    label = dict(PAYMENT_METHODS).get(pid, pid)
+
+    # отмечаем выбор прямо в сообщении шага оплаты, ничего лишнего не шлём
+    msg_id = data.get("payment_msg")
+    kb = InlineKeyboardBuilder()
+    for p, lbl in PAYMENT_METHODS:
+        kb.button(text=("✅ " if p == pid else "") + lbl, callback_data=f"buy:pay:{p}")
+    kb.button(text="✅ К оплате", callback_data="buy:checkout")
+    kb.adjust(1)
+    if msg_id:
+        try:
+            await callback.bot.edit_message_reply_markup(
+                callback.message.chat.id, msg_id, reply_markup=kb.as_markup()
+            )
+        except Exception:
+            pass
 
 
 @router.callback_query(F.data == "buy:checkout")
@@ -358,6 +405,15 @@ async def buy_checkout(callback: CallbackQuery, state: FSMContext):
     kb.button(text="💎 Подписка", callback_data="menu:subscribe")
     kb.button(text="👥 Реф. программа", callback_data="menu:referral")
     kb.adjust(1)
+
+    # итог заказа — важное сообщение: очищаем хвосты визарда и оставляем его отдельно
+    for mid in (data.get("payment_msg"), data.get("step_msg")):
+        if mid:
+            try:
+                await callback.bot.delete_message(callback.message.chat.id, mid)
+            except Exception:
+                pass
+
     await state.clear()
     await callback.message.answer(
         text=(
@@ -390,7 +446,8 @@ async def promo_menu(callback: CallbackQuery):
     kb.button(text="💎 К тарифам", callback_data="menu:subscribe")
     kb.button(text=f"💬 {TG_SUPPORT_LABEL}", url=TG_SUPPORT_URL)
     kb.adjust(1)
-    await callback.message.answer(
+    await _swap(
+        callback,
         text=(
             "🎁 <b>Промокоды</b>\n\n"
             "Промокоды заработают вместе с приёмом платежей — поле для них уже есть "
@@ -398,7 +455,7 @@ async def promo_menu(callback: CallbackQuery):
             "Как только запустим — актуальные коды будут появляться в этом разделе "
             "и в нашем канале. Следите за новостями 😉"
         ),
-        reply_markup=kb.as_markup(),
+        kb=_back_to_menu_kb(),
     )
 
 
