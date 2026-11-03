@@ -229,6 +229,46 @@ async def subscribe_menu(callback: CallbackQuery, state: FSMContext):
     if await _assistant_guard(callback):
         return
     await state.clear()
+    
+    # Проверяем активную подписку
+    from database import get_active_subscription, get_plan
+    from datetime import datetime
+    
+    sub = await get_active_subscription(callback.from_user.id)
+    if sub:
+        # Показываем управление существующей подпиской
+        plan_obj = await get_plan(sub.plan)
+        plan_name = plan_obj.name if plan_obj else sub.plan
+        days_left = (sub.expires_at - datetime.utcnow()).days
+        hours_left = int((sub.expires_at - datetime.utcnow()).seconds / 3600)
+        
+        auto_renew_text = "🟢 Включено" if True else "🔴 Выключено"  # можно добавить поле в модель
+        next_charge_date = (sub.expires_at).strftime('%d.%m.%Y')
+        
+        text = (
+            "💳 <b>Подписка RavaVPN</b>\n\n"
+            f"ℹ️ Статус: 🟢 <b>Активна</b>\n"
+            f"🕓 Осталось: <b>{days_left} дн. {hours_left} ч.</b>\n"
+            f"💻 Можно подключить до: <b>3 устройств</b>\n"
+            f"🔄 Автопродление: {auto_renew_text}\n\n"
+            f"⚠️ Списание 250 ₽ произойдёт <b>{next_charge_date}</b> 00:01.\n"
+            "Если ваш баланс будет меньше, подписка будет приостановлена."
+        )
+        
+        kb = InlineKeyboardBuilder()
+        kb.button(text="🔗 Подключиться", url=f"https://ravavpn.ru/connect?user={callback.from_user.id}")
+        kb.button(text="📋 Скопировать ссылку", callback_data=f"copy:connect:{callback.from_user.id}")
+        kb.button(text="🎁 Подарить подписку", callback_data="menu:gifts")
+        kb.button(text="🛠 Управление устройствами", callback_data="menu:devices")
+        kb.button(text="🔁 Продлить", callback_data="menu:renew")
+        kb.button(text="🔄 Автопродление", callback_data="menu:autorenew")
+        kb.button(text="⬅️ Назад", callback_data="menu:main")
+        kb.adjust(1)
+        
+        await _swap(callback, text=text, kb=kb)
+        return
+    
+    # Нет активной подписки — показываем покупку
     await _swap(
         callback,
         text=(

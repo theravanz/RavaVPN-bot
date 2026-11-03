@@ -282,6 +282,20 @@ async def get_user(tg_id: int) -> User | None:
         return await session.get(User, tg_id)
 
 
+async def get_active_subscription(tg_id: int) -> Subscription | None:
+    """Получить активную подписку пользователя."""
+    from sqlalchemy import select
+    from datetime import datetime
+    async with SessionMaker() as session:
+        result = await session.execute(
+            select(Subscription)
+            .where(Subscription.user_id == tg_id)
+            .where(Subscription.status == "active")
+            .where(Subscription.expires_at > datetime.utcnow())
+        )
+        return result.scalar_one_or_none()
+
+
 async def find_user_by_ref_code(code: str) -> User | None:
     async with SessionMaker() as session:
         return (await session.scalars(select(User).where(User.referral_code == code))).first()
