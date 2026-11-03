@@ -411,7 +411,7 @@ async def create_payment(tg_id: int, plan_key: str, amount: float) -> dict:
     Создаёт платёж в Platega и сохраняет запись в БД бота.
     Возвращает: {'payment_url': str, 'payment_id': str}
     """
-    from random import uuid4
+    from uuid import uuid4
     from sqlalchemy import select
     from config import settings
 

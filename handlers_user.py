@@ -441,9 +441,9 @@ async def buy_checkout(callback: CallbackQuery, state: FSMContext):
                 "✅ <b>Счёт Platega создан</b>\n\n"
                 f"💰 Сумма: {plan.price:.2f}₽\n"
                 f"🆔 ID платежа: {result['payment_id']}\n\n"
-                "После оплаты нажмите «Проверить оплату».
-"
-                f"🔗 <a href="{result['payment_url']}">{result['payment_url']}</a>"
+                "После оплаты нажмите «Проверить оплату»."
+                "После оплаты нажмите «Проверить оплату».\n"
+                f"🔗 <a href={result['payment_url']}>{result['payment_url']}</a>"
             ),
             reply_markup=InlineKeyboardBuilder().button(
                 text="🔍 Проверить оплату",
