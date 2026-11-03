@@ -441,9 +441,8 @@ async def buy_checkout(callback: CallbackQuery, state: FSMContext):
                 "✅ <b>Счёт Platega создан</b>\n\n"
                 f"💰 Сумма: {plan.price:.2f}₽\n"
                 f"🆔 ID платежа: {result['payment_id']}\n\n"
-                "После оплаты нажмите «Проверить оплату»."
                 "После оплаты нажмите «Проверить оплату».\n"
-                f"🔗 <a href={result['payment_url']}>{result['payment_url']}</a>"
+                f"🔗 <a href=\"{result['payment_url']}\">{result['payment_url']}</a>"
             ),
             reply_markup=InlineKeyboardBuilder().button(
                 text="🔍 Проверить оплату",
@@ -483,12 +482,13 @@ async def buy_verify(callback: CallbackQuery, state: FSMContext):
     payment_id = callback.data.split(":")[2]
     
     # Проверяем статус платежа в БД бота
-    from database import SessionMaker
-    from sqlalchemy import select
+    from database import SessionMaker, Payment, Subscription
+    from sqlalchemy import select, update
+    from datetime import datetime, timedelta
     
     async with SessionMaker() as session:
         result = await session.execute(
-            select(Payment).where(Payment.order_id == payment_id)
+            select(Payment).where(Payment.platega_id == payment_id)
         )
         payment = result.scalar_one_or_none()
     
@@ -497,12 +497,69 @@ async def buy_verify(callback: CallbackQuery, state: FSMContext):
         return
     
     if payment.status == "paid" or payment.status == "created":
+        # Для мока: сразу переводим в paid и создаём подписку
+        if payment.status == "created":
+            async with SessionMaker() as session:
+                await session.execute(
+                    update(Payment)
+                    .where(Payment.id == payment.id)
+                    .values(status="paid")
+                )
+                await session.commit()
+        
+        # Создаём/активируем подписку
+        async with SessionMaker() as session:
+            # Проверяем, есть ли уже подписка
+            existing = await session.execute(
+                select(Subscription).where(Subscription.user_id == callback.from_user.id, Subscription.status == "active")
+            )
+            if not existing.scalar_one_or_none():
+                # Определяем план из payment.meta
+                plan_key = "1m"
+                try:
+                    import json
+                    meta = json.loads(payment.meta) if payment.meta else {}
+                    plan_key = meta.get("plan_key", "1m")
+                except Exception:
+                    pass
+                
+                # Получаем длительность плана из БД
+                from database import get_plan
+                plan_obj = await get_plan(plan_key)
+                days = plan_obj.days if plan_obj else 30
+                
+                session.add(Subscription(
+                    user_id=callback.from_user.id,
+                    plan=plan_key,
+                    status="active",
+                    started_at=datetime.utcnow(),
+                    expires_at=datetime.utcnow() + timedelta(days=days),
+                ))
+                await session.commit()
+        
+        # Формируем красивое сообщение об успехе
+        devices_limit = 3  # базовый лимит
+        connect_url = f"https://ravavpn.ru/connect?user={callback.from_user.id}"  # ссылка на подключение
+        
+        text = (
+            "✅ <b>Платёж подтверждён!</b>\n"
+            "🎉 <b>Подписка успешно активирована</b>\n\n"
+            f"🔗 <b>Ссылка на подключение:</b>\n"
+            f"<code>{connect_url}</code>\n\n"
+            f"📱 <b>Лимит устройств:</b> {devices_limit}\n"
+            f"📅 <b>Действует до:</b> {(datetime.utcnow() + timedelta(days=days)).strftime('%d.%m.%Y')}"
+        )
+        
+        kb = InlineKeyboardBuilder()
+        kb.button(text="🔗 Подключиться", url=connect_url)
+        kb.button(text="📤 Поделиться", callback_data=f"share:sub:{callback.from_user.id}")
+        kb.button(text="🛠 Управлять устройствами", callback_data="menu:devices")
+        kb.adjust(1)
+        
         await callback.message.answer(
-            text=f"✅ Платёж успешно оплачен!",
-            reply_markup=InlineKeyboardBuilder().button(
-                text="✅ Активировать подписку",
-                callback_data="menu:subscribe"
-            ).adjust(1).as_markup(),
+            text=text,
+            reply_markup=kb.as_markup(),
+            parse_mode="HTML"
         )
     elif payment.status == "pending":
         await callback.message.answer(

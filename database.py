@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import (
     BigInteger, Boolean, DateTime, Numeric, String, Text,
-    func, inspect as sa_inspect, select, text,
+    func, inspect as sa_inspect, select, text, update,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -118,7 +118,9 @@ class Subscription(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(BigInteger, index=True)
     plan: Mapped[str] = mapped_column(String(8))  # -> Plan.key
+    status: Mapped[str] = mapped_column(String(16), default="active")  # active | expired | cancelled
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    started_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
 
 
@@ -132,6 +134,7 @@ class Payment(Base):
     order_id: Mapped[str] = mapped_column(String(36), nullable=True)
     platega_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="pending")  # pending | paid | failed
+    meta: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON: plan_key, etc.
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
 
 
@@ -177,6 +180,28 @@ def _add_missing_columns(sync_conn):
     for name, ddl in settings_new.items():
         if name not in scols:
             sync_conn.execute(text(f"ALTER TABLE settings ADD COLUMN {name} {ddl}"))
+
+    # === payments table ===
+    pcols = {c["name"] for c in insp.get_columns("payments")}
+    payments_new = {
+        "order_id": "VARCHAR(36) NULL",
+        "platega_id": "VARCHAR(36) NULL",
+        "status": "VARCHAR(16) NOT NULL DEFAULT 'pending'",
+        "meta": "TEXT NULL",
+    }
+    for name, ddl in payments_new.items():
+        if name not in pcols:
+            sync_conn.execute(text(f"ALTER TABLE payments ADD COLUMN {name} {ddl}"))
+
+    # === subscriptions table ===
+    scols = {c["name"] for c in insp.get_columns("subscriptions")}
+    subs_new = {
+        "status": "VARCHAR(16) NOT NULL DEFAULT 'active'",
+        "started_at": "TIMESTAMP NOT NULL DEFAULT NOW()",
+    }
+    for name, ddl in subs_new.items():
+        if name not in scols:
+            sync_conn.execute(text(f"ALTER TABLE subscriptions ADD COLUMN {name} {ddl}"))
 
 
 async def init_db():
@@ -423,6 +448,7 @@ async def create_payment(tg_id: int, plan_key: str, amount: float) -> dict:
         kind="subscription",
         order_id=order_id,
         status="pending",
+        meta=f'{{"plan_key": "{plan_key}"}}',
     )
 
     # Создаём запись в БД бота
@@ -432,9 +458,60 @@ async def create_payment(tg_id: int, plan_key: str, amount: float) -> dict:
         await session.commit()
         await session.refresh(payment)
 
-    # Создаём платёж в Platega
+    # Dev mode: если нет ключей — создаём мок-платёж для тестирования
+    use_sandbox = settings.PLATEGA_USE_SANDBOX or (not settings.PLATEGA_MERCHANT_ID or not settings.PLATEGA_SECRET_KEY)
+    api_url = settings.PLATEGA_SANDBOX_URL if use_sandbox else settings.PLATEGA_API_URL
+    
+    # Если нет ключей — возвращаем мок URL для разработки
+    if not settings.PLATEGA_MERCHANT_ID or not settings.PLATEGA_SECRET_KEY:
+        mock_payment_id = f"mock_{order_id[:8]}"
+        mock_url = f"{api_url.replace('/api/v1/transactions', '')}/pay/mock/{order_id}"
+        
+        async with SessionMaker() as session:
+            await session.execute(
+                update(Payment)
+                .where(Payment.order_id == order_id)
+                .values(platega_id=mock_payment_id, status="created")
+            )
+            await session.commit()
+            
+            # Уведомляем веб-сайт
+            if settings.web_api_url and settings.web_api_url.startswith("http") and settings.WEBHOOK_SECRET:
+                try:
+                    import hmac
+                    import hashlib
+                    import json
+                    webhook_payload = {
+                        "eventId": f"bot_payment_{order_id}",
+                        "kind": "platega_payment_created",
+                        "payload": {
+                            "orderId": order_id,
+                            "paymentId": mock_payment_id,
+                            "amount": amount,
+                            "planKey": plan_key,
+                            "userId": tg_id,
+                        },
+                    }
+                    signature = hmac.new(
+                        settings.WEBHOOK_SECRET.encode(),
+                        json.dumps(webhook_payload, sort_keys=True).encode(),
+                        hashlib.sha256
+                    ).hexdigest()
+                    async with aiohttp.ClientSession() as web_session:
+                        async with web_session.post(
+                            f"{settings.web_api_url}/api/webhooks/platega",
+                            json=webhook_payload,
+                            headers={"Content-Type": "application/json", "x-webhook-signature": signature}
+                        ):
+                            pass
+                except Exception:
+                    pass
+        
+        return {"payment_url": mock_url, "payment_id": mock_payment_id}
+
+    # Продакшн: реальный запрос к Platega
     payload = {
-        "amount": int(amount * 100),  # в копейках
+        "amount": int(amount * 100),
         "currency": "RUB",
         "order_id": order_id,
         "description": f"Подписка RavaVPN · {plan_key}",
@@ -450,11 +527,7 @@ async def create_payment(tg_id: int, plan_key: str, amount: float) -> dict:
 
     import aiohttp
     async with aiohttp.ClientSession() as session:
-        async with session.post(
-            settings.PLATEGA_API_URL,
-            json=payload,
-            headers=headers
-        ) as resp:
+        async with session.post(api_url, json=payload, headers=headers) as resp:
             data = await resp.json()
             if resp.status == 200:
                 payment_url = data.get("url")
@@ -467,13 +540,11 @@ async def create_payment(tg_id: int, plan_key: str, amount: float) -> dict:
                         )
                         await session.commit()
                         
-                        # Уведомляем веб-сайт (с безопасной подписью) — только если секрет задан
                         if settings.web_api_url and settings.web_api_url.startswith("http") and settings.WEBHOOK_SECRET:
                             try:
                                 import hmac
                                 import hashlib
                                 import json
-                                
                                 webhook_payload = {
                                     "eventId": f"bot_payment_{order_id}",
                                     "kind": "platega_payment_created",
@@ -490,15 +561,11 @@ async def create_payment(tg_id: int, plan_key: str, amount: float) -> dict:
                                     json.dumps(webhook_payload, sort_keys=True).encode(),
                                     hashlib.sha256
                                 ).hexdigest()
-                                
                                 async with aiohttp.ClientSession() as web_session:
                                     async with web_session.post(
                                         f"{settings.web_api_url}/api/webhooks/platega",
                                         json=webhook_payload,
-                                        headers={
-                                            "Content-Type": "application/json",
-                                            "x-webhook-signature": signature,
-                                        }
+                                        headers={"Content-Type": "application/json", "x-webhook-signature": signature}
                                     ):
                                         pass
                             except Exception:

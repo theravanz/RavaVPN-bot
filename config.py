@@ -17,8 +17,10 @@ class Settings(BaseSettings):
 
     # Platega API credentials
     PLATEGA_API_URL: str = "https://app.platega.io/api/v1/transactions"
+    PLATEGA_SANDBOX_URL: str = "https://sandbox.platega.io/api/v1/transactions"
     PLATEGA_MERCHANT_ID: str = ""
     PLATEGA_SECRET_KEY: str = ""
+    PLATEGA_USE_SANDBOX: bool = False  # true для разработки без реальных ключей
 
     # Webhook secret for bot-web communication — ОБЯЗАТЕЛЬНО задать в .env
     WEBHOOK_SECRET: str = ""
