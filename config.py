@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     admin_ids: str = ""
     database_url: str = "sqlite+aiosqlite:///./bot.db"
     web_api_url: str = "http://localhost:3000"
+    web_app_url: str = ""  # Публичный HTTPS URL для кнопок в Telegram (задать в .env)
     telegram_auth_secret: str = ""
     bot_username: str = "RavaVPN_bot"  # для реферальных deep-link'ов
 

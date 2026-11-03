@@ -245,28 +245,35 @@ async def subscribe_menu(callback: CallbackQuery, state: FSMContext):
         auto_renew_text = "🟢 Включено" if True else "🔴 Выключено"  # можно добавить поле в модель
         next_charge_date = (sub.expires_at).strftime('%d.%m.%Y')
         
+        # Берём название проекта из настроек
+        s = await get_settings()
+        project_name = s.bot_name if s and s.bot_name else "RavaVPN"
+        # Используем web_app_url если задан, иначе не показываем кнопку подключения
+        connect_url = f"{settings.web_app_url}/connect?user={callback.from_user.id}" if settings.web_app_url else None
+        
         text = (
-            "💳 <b>Подписка RavaVPN</b>\n\n"
-            f"ℹ️ Статус: 🟢 <b>Активна</b>\n"
-            f"🕓 Осталось: <b>{days_left} дн. {hours_left} ч.</b>\n"
-            f"💻 Можно подключить до: <b>3 устройств</b>\n"
-            f"🔄 Автопродление: {auto_renew_text}\n\n"
-            f"⚠️ Списание 250 ₽ произойдёт <b>{next_charge_date}</b> 00:01.\n"
-            "Если ваш баланс будет меньше, подписка будет приостановлена."
-        )
+        f"💳 <b>Подписка {project_name}</b>\n\n"
+        f"ℹ️ Статус: 🟢 <b>Активна</b>\n"
+        f"🕓 Осталось: <b>{days_left} дн. {hours_left} ч.</b>\n"
+        f"💻 Можно подключить до: <b>3 устройств</b>\n"
+        f"🔄 Автопродление: {auto_renew_text}\n\n"
+        f"⚠️ Списание 250 ₽ произойдёт <b>{next_charge_date}</b> 00:01.\n"
+        "Если оплата не пройдёт, подписка будет приостановлена."
+    )
+    
+    kb = InlineKeyboardBuilder()
+    if connect_url:
+        kb.button(text="🔗 Подключиться", url=connect_url)
+    kb.button(text="📋 Скопировать ссылку", callback_data=f"copy:connect:{callback.from_user.id}")
+    kb.button(text="🎁 Подарить подписку", callback_data="menu:gifts")
+    kb.button(text="🛠 Управление устройствами", callback_data="menu:devices")
+    kb.button(text="🔁 Продлить", callback_data="menu:renew")
+    kb.button(text="🔄 Автопродление", callback_data="menu:autorenew")
+    kb.button(text="⬅️ Назад", callback_data="menu:main")
+    kb.adjust(1)
         
-        kb = InlineKeyboardBuilder()
-        kb.button(text="🔗 Подключиться", url=f"https://ravavpn.ru/connect?user={callback.from_user.id}")
-        kb.button(text="📋 Скопировать ссылку", callback_data=f"copy:connect:{callback.from_user.id}")
-        kb.button(text="🎁 Подарить подписку", callback_data="menu:gifts")
-        kb.button(text="🛠 Управление устройствами", callback_data="menu:devices")
-        kb.button(text="🔁 Продлить", callback_data="menu:renew")
-        kb.button(text="🔄 Автопродление", callback_data="menu:autorenew")
-        kb.button(text="⬅️ Назад", callback_data="menu:main")
-        kb.adjust(1)
-        
-        await _swap(callback, text=text, kb=kb)
-        return
+    await _swap(callback, text=text, kb=kb.as_markup())
+    return
     
     # Нет активной подписки — показываем покупку
     await _swap(
@@ -431,6 +438,7 @@ async def buy_checkout(callback: CallbackQuery, state: FSMContext):
     n = data.get("devices", 3)
     promo = data.get("promo")
     pid = data.get("payment")
+    is_gift = data.get("gift", False)
     pay_label = dict(PAYMENT_METHODS).get(pid, "не выбран")
 
     # реферальный баланс — покажем, сколько доступно списать
@@ -455,9 +463,10 @@ async def buy_checkout(callback: CallbackQuery, state: FSMContext):
                 pass
 
     await state.clear()
+    title = "🎁 <b>Подарочный заказ</b>" if is_gift else "🧾 <b>Итог заказа</b>"
     await callback.message.answer(
         text=(
-            "🧾 <b>Итог заказа</b>\n\n"
+            f"{title}\n\n"
             f"Тариф: <b>{plan.name if plan else '—'}</b>\n"
             f"Устройств: <b>{n}</b>\n"
             f"Способ оплаты: <b>{pay_label}</b>"
@@ -476,6 +485,19 @@ async def buy_checkout(callback: CallbackQuery, state: FSMContext):
         from database import create_payment
         result = await create_payment(callback.from_user.id, plan.key, plan.price)
 
+        # Сохраняем gift флаг в метаданные платежа
+        if is_gift:
+            from database import SessionMaker, Payment
+            from sqlalchemy import update
+            import json
+            async with SessionMaker() as session:
+                await session.execute(
+                    update(Payment)
+                    .where(Payment.order_id == result['order_id'])
+                    .values(meta=json.dumps({"plan_key": plan.key, "is_gift": True, "buyer_id": callback.from_user.id}))
+                )
+                await session.commit()
+
         await callback.message.answer(
             text=(
                 "✅ <b>Счёт Platega создан</b>\n\n"
@@ -491,10 +513,8 @@ async def buy_checkout(callback: CallbackQuery, state: FSMContext):
             parse_mode="HTML"
         )
     except Exception as e:
-        await callback.message.answer(
-            text=f"❌ Ошибка: {str(e)}\n\n"
-                 "Попробуйте позже или обратитесь в поддержку."
-        )
+                "После оплаты нажмите «Проверить оплату».\n"
+                f"🔗 <a href=\"{result['payment_url']}\">{result['payment_url']}</a>"
 
 
 # ========= ПРОМОКОД =========
@@ -578,12 +598,15 @@ async def buy_verify(callback: CallbackQuery, state: FSMContext):
                 await session.commit()
         
         # Формируем красивое сообщение об успехе
-        devices_limit = 3  # базовый лимит
-        connect_url = f"https://ravavpn.ru/connect?user={callback.from_user.id}"  # ссылка на подключение
+        s = await get_settings()
+        project_name = s.bot_name if s and s.bot_name else "RavaVPN"
+        # Используем web_app_url если задан, иначе не показываем кнопку подключения
+        # Используем web_app_url если задан, иначе не показываем кнопку подключения
+        connect_url = f"{settings.web_app_url}/connect?user={callback.from_user.id}" if settings.web_app_url else None
         
         text = (
             "✅ <b>Платёж подтверждён!</b>\n"
-            "🎉 <b>Подписка успешно активирована</b>\n\n"
+            f"🎉 <b>Подписка {project_name} успешно активирована</b>\n\n"
             f"🔗 <b>Ссылка на подключение:</b>\n"
             f"<code>{connect_url}</code>\n\n"
             f"📱 <b>Лимит устройств:</b> {devices_limit}\n"
@@ -591,7 +614,8 @@ async def buy_verify(callback: CallbackQuery, state: FSMContext):
         )
         
         kb = InlineKeyboardBuilder()
-        kb.button(text="🔗 Подключиться", url=connect_url)
+        if connect_url:
+            kb.button(text="🔗 Подключиться", url=connect_url)
         kb.button(text="📤 Поделиться", callback_data=f"share:sub:{callback.from_user.id}")
         kb.button(text="🛠 Управлять устройствами", callback_data="menu:devices")
         kb.adjust(1)
@@ -722,6 +746,31 @@ async def cmd_menu(message: Message):
 async def back_to_menu(callback: CallbackQuery):
     await callback.answer()
     await send_main_menu(callback.message)
+
+
+@router.callback_query(F.data == "menu:main")
+async def main_menu(callback: CallbackQuery):
+    await callback.answer()
+    await send_main_menu(callback.message)
+
+
+@router.callback_query(F.data == "menu:gifts")
+async def gifts_menu(callback: CallbackQuery, state: FSMContext):
+    """Подарить подписку — запуск покупки с флагом gift."""
+    await callback.answer()
+    if await _assistant_guard(callback):
+        return
+    await state.clear()
+    await state.update_data(gift=True)
+    await _swap(
+        callback,
+        text=(
+            "🎁 <b>Подарить подписку</b>\n\n"
+            "Выберите тариф — получатель активирует подарок по ссылке.\n\n"
+            "<b>Шаг 1 из 3</b> — выберите тариф:"
+        ),
+        kb=await _kb_plans(),
+    )
 
 
 @router.callback_query(F.data.startswith("menu:"))
