@@ -72,7 +72,7 @@ TG_SUPPORT_LABEL = "Написать в поддержку"
 PAYMENT_METHODS = [
     ("sbp", "🅿️ Platega · СБП"),
     ("crypto", "🪙 Platega · Криптовалюта"),
-    ("cispay", "💳 CISPay"),
+    ("cispay", "💳 CISPay (скоро)"),
 ]
 
 SECTION_NAMES = {
@@ -423,20 +423,97 @@ async def buy_checkout(callback: CallbackQuery, state: FSMContext):
             f"Способ оплаты: <b>{pay_label}</b>"
             + (f"\nПромокод: <code>{promo}</code>" if promo else "")
             + bonus_line + "\n\n"
-            "🚧 <b>Приём платежей скоро заработает</b> — подключаем Platega и CISPay. "
-            "Как только оплатим — ключ придёт сюда и в кабинет на сайте."
+            "🔄 Создаём платёж в Platega..."
+            "<i>Ожидайте, ваш счёт составит ~250₽</i>"
         ),
-        reply_markup=kb.as_markup(),
+        reply_markup=InlineKeyboardBuilder().button(
+            text="⏳ Подождите",
+            callback_data="buy:checking"
+        ).adjust(1).as_markup(),
     )
 
+    try:
+        from database import create_payment
+        result = await create_payment(callback.from_user.id, plan.key, plan.price)
 
-@router.callback_query(F.data == "noop")
-async def buy_noop(callback: CallbackQuery):
-    await callback.answer()
+        await callback.message.answer(
+            text=(
+                "✅ <b>Счёт Platega создан</b>\n\n"
+                f"💰 Сумма: {plan.price:.2f}₽\n"
+                f"🆔 ID платежа: {result['payment_id']}\n\n"
+                "После оплаты нажмите «Проверить оплату».
+"
+                f"🔗 <a href="{result['payment_url']}">{result['payment_url']}</a>"
+            ),
+            reply_markup=InlineKeyboardBuilder().button(
+                text="🔍 Проверить оплату",
+                callback_data=f"buy:verify:{result['payment_id']}"
+            ).adjust(1).as_markup(),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await callback.message.answer(
+            text=f"❌ Ошибка: {str(e)}\n\n"
+                 "Попробуйте позже или обратитесь в поддержку."
+        )
 
 
 # ========= ПРОМОКОД =========
 
+
+
+@router.callback_query(F.data == "buy:checking")
+async def buy_checking(callback: CallbackQuery, state: FSMContext):
+    """Показываем сообщение ожидания создания платежа"""
+    await callback.answer()
+    # Сообщаем пользователю, что идёт создание платежа
+    await callback.message.answer(
+        text="⏳ Идёт создание платежа в Platega...",
+        reply_markup=InlineKeyboardBuilder().button(
+            text="⏳ Подождите",
+            callback_data="buy:checking"
+        ).adjust(1).as_markup(),
+    )
+
+
+@router.callback_query(F.data.startswith("buy:verify:"))
+async def buy_verify(callback: CallbackQuery, state: FSMContext):
+    """Проверяем статус платежа в Platega"""
+    await callback.answer()
+    payment_id = callback.data.split(":")[2]
+    
+    # Проверяем статус платежа в БД бота
+    from database import SessionMaker
+    from sqlalchemy import select
+    
+    async with SessionMaker() as session:
+        result = await session.execute(
+            select(Payment).where(Payment.order_id == payment_id)
+        )
+        payment = result.scalar_one_or_none()
+    
+    if not payment:
+        await callback.message.answer("❌ Платёж не найден")
+        return
+    
+    if payment.status == "paid" or payment.status == "created":
+        await callback.message.answer(
+            text=f"✅ Платёж успешно оплачен!",
+            reply_markup=InlineKeyboardBuilder().button(
+                text="✅ Активировать подписку",
+                callback_data="menu:subscribe"
+            ).adjust(1).as_markup(),
+        )
+    elif payment.status == "pending":
+        await callback.message.answer(
+            text="⏳ Платёж ещё не подтверждён. Подождите пару секунд и попробуйте снова.",
+            reply_markup=InlineKeyboardBuilder().button(
+                text="🔍 Проверить",
+                callback_data=f"buy:verify:{payment_id}"
+            ).adjust(1).as_markup(),
+        )
+    else:
+        await callback.message.answer(f"❌ Статус платежа: {payment.status}")
 @router.callback_query(F.data == "menu:promo")
 async def promo_menu(callback: CallbackQuery):
     await callback.answer()

@@ -129,7 +129,10 @@ class Payment(Base):
     user_id: Mapped[int] = mapped_column(BigInteger, index=True)
     amount: Mapped[float] = mapped_column(Numeric(10, 2))
     kind: Mapped[str] = mapped_column(String(16))  # "subscription" | "topup"
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    order_id: Mapped[str] = mapped_column(String(36), nullable=True)
+    platega_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending")  # pending | paid | failed
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
 
 
 def _utcnow() -> datetime:
@@ -402,3 +405,114 @@ async def get_stats() -> dict:
 
 def fmt_money(v: float) -> str:
     return f"{v:,.0f}".replace(",", " ")
+
+async def create_payment(tg_id: int, plan_key: str, amount: float) -> dict:
+    """
+    Создаёт платёж в Platega и сохраняет запись в БД бота.
+    Возвращает: {'payment_url': str, 'payment_id': str}
+    """
+    from random import uuid4
+    from sqlalchemy import select
+    from config import settings
+
+    order_id = str(uuid4())
+
+    payment = Payment(
+        user_id=tg_id,
+        amount=amount,
+        kind="subscription",
+        order_id=order_id,
+        status="pending",
+    )
+
+    # Создаём запись в БД бота
+    from database import SessionMaker
+    async with SessionMaker() as session:
+        session.add(payment)
+        await session.commit()
+        await session.refresh(payment)
+
+    # Создаём платёж в Platega
+    payload = {
+        "amount": int(amount * 100),  # в копейках
+        "currency": "RUB",
+        "order_id": order_id,
+        "description": f"Подписка RavaVPN · {plan_key}",
+        "payment_method": "sbp",
+        "return_url": f"{settings.web_api_url or 'https://rava.vpn'}/webhook/platega",
+    }
+
+    headers = {
+        "X-MerchantId": settings.PLATEGA_MERCHANT_ID,
+        "X-Secret": settings.PLATEGA_SECRET_KEY,
+        "Content-Type": "application/json",
+    }
+
+    import aiohttp
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            settings.PLATEGA_API_URL,
+            json=payload,
+            headers=headers
+        ) as resp:
+            data = await resp.json()
+            if resp.status == 200:
+                payment_url = data.get("url")
+                if payment_url:
+                    async with SessionMaker() as session:
+                        await session.execute(
+                            update(Payment)
+                            .where(Payment.order_id == order_id)
+                            .values(platega_id=data.get("id"), status="created")
+                        )
+                        await session.commit()
+                        
+                        # Уведомляем веб-сайт (с безопасной подписью) — только если секрет задан
+                        if settings.web_api_url and settings.web_api_url.startswith("http") and settings.WEBHOOK_SECRET:
+                            try:
+                                import hmac
+                                import hashlib
+                                import json
+                                
+                                webhook_payload = {
+                                    "eventId": f"bot_payment_{order_id}",
+                                    "kind": "platega_payment_created",
+                                    "payload": {
+                                        "orderId": order_id,
+                                        "paymentId": data.get("id"),
+                                        "amount": amount,
+                                        "planKey": plan_key,
+                                        "userId": tg_id,
+                                    },
+                                }
+                                signature = hmac.new(
+                                    settings.WEBHOOK_SECRET.encode(),
+                                    json.dumps(webhook_payload, sort_keys=True).encode(),
+                                    hashlib.sha256
+                                ).hexdigest()
+                                
+                                async with aiohttp.ClientSession() as web_session:
+                                    async with web_session.post(
+                                        f"{settings.web_api_url}/api/webhooks/platega",
+                                        json=webhook_payload,
+                                        headers={
+                                            "Content-Type": "application/json",
+                                            "x-webhook-signature": signature,
+                                        }
+                                    ):
+                                        pass
+                            except Exception:
+                                pass
+                        
+                    return {"payment_url": payment_url, "payment_id": data.get("id")}
+
+    # Если ошибка — обновляем статус
+    async with SessionMaker() as session:
+        await session.execute(
+            update(Payment)
+            .where(Payment.order_id == order_id)
+            .values(status="failed")
+        )
+        await session.commit()
+
+    raise Exception("Не удалось создать платёж в Platega")

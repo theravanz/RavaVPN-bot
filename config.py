@@ -15,6 +15,14 @@ class Settings(BaseSettings):
     telegram_auth_secret: str = ""
     bot_username: str = "RavaVPN_bot"  # для реферальных deep-link'ов
 
+    # Platega API credentials
+    PLATEGA_API_URL: str = "https://app.platega.io/api/v1/transactions"
+    PLATEGA_MERCHANT_ID: str = ""
+    PLATEGA_SECRET_KEY: str = ""
+
+    # Webhook secret for bot-web communication — ОБЯЗАТЕЛЬНО задать в .env
+    WEBHOOK_SECRET: str = ""
+
 
 settings = Settings()
 
