@@ -473,7 +473,7 @@ async def buy_checkout(callback: CallbackQuery, state: FSMContext):
             + (f"\nПромокод: <code>{promo}</code>" if promo else "")
             + bonus_line + "\n\n"
             "🔄 Создаём платёж в Platega..."
-            "<i>Ожидайте, ваш счёт составит ~250₽</i>"
+            f"<i>Ожидайте, ваш счёт составит {plan.price:.0f}₽</i>"
         ),
         reply_markup=InlineKeyboardBuilder().button(
             text="⏳ Подождите",
