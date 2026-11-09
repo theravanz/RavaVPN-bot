@@ -17,8 +17,8 @@ class Settings(BaseSettings):
     bot_username: str = "RavaVPN_bot"  # для реферальных deep-link'ов
 
     # Platega API credentials
-    PLATEGA_API_URL: str = "https://app.platega.io/api/v1/transactions"
-    PLATEGA_SANDBOX_URL: str = "https://sandbox.platega.io/api/v1/transactions"
+    PLATEGA_API_URL: str = "https://app.platega.io/transaction/process"
+    PLATEGA_SANDBOX_URL: str = "https://app.platega.io/transaction/process"
     PLATEGA_MERCHANT_ID: str = ""
     PLATEGA_SECRET_KEY: str = ""
     PLATEGA_USE_SANDBOX: bool = False  # true для разработки без реальных ключей

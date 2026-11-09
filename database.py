@@ -1,3 +1,4 @@
+import logging
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
@@ -9,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from config import settings
+
+log = logging.getLogger(__name__)
 
 engine = create_async_engine(settings.database_url, pool_pre_ping=True)
 SessionMaker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -445,16 +448,25 @@ async def get_stats() -> dict:
 def fmt_money(v: float) -> str:
     return f"{v:,.0f}".replace(",", " ")
 
-async def create_payment(tg_id: int, plan_key: str, amount: float) -> dict:
+async def create_payment(
+    tg_id: int,
+    plan_key: str,
+    amount: float,
+    payment_method: str = "sbp",
+) -> dict:
     """
     Создаёт платёж в Platega и сохраняет запись в БД бота.
-    Возвращает: {'payment_url': str, 'payment_id': str}
+
+    Использует актуальную ручку Platega `POST /transaction/process`.
+    Возвращает: {'payment_url': str, 'payment_id': str, 'order_id': str}
     """
+    import json
     from uuid import uuid4
-    from sqlalchemy import select
-    from config import settings
+
+    import aiohttp
 
     order_id = str(uuid4())
+    method_id = {"sbp": 2, "card": 11, "crypto": 13}.get(payment_method, 2)
 
     payment = Payment(
         user_id=tg_id,
@@ -462,25 +474,35 @@ async def create_payment(tg_id: int, plan_key: str, amount: float) -> dict:
         kind="subscription",
         order_id=order_id,
         status="pending",
-        meta=f'{{"plan_key": "{plan_key}"}}',
+        meta=json.dumps({"plan_key": plan_key, "payment_method": payment_method}),
     )
 
-    # Создаём запись в БД бота
-    from database import SessionMaker
     async with SessionMaker() as session:
         session.add(payment)
         await session.commit()
         await session.refresh(payment)
 
-    # Dev mode: если нет ключей — создаём мок-платёж для тестирования
-    use_sandbox = settings.PLATEGA_USE_SANDBOX or (not settings.PLATEGA_MERCHANT_ID or not settings.PLATEGA_SECRET_KEY)
+        user = await session.get(User, tg_id)
+        username = user.username if user else None
+
+    use_sandbox = settings.PLATEGA_USE_SANDBOX or (
+        not settings.PLATEGA_MERCHANT_ID or not settings.PLATEGA_SECRET_KEY
+    )
     api_url = settings.PLATEGA_SANDBOX_URL if use_sandbox else settings.PLATEGA_API_URL
-    
-    # Если нет ключей — возвращаем мок URL для разработки
+    # Старые .env могли хранить устаревший /api/v1/transactions — приводим к новой ручке.
+    if "/api/v1/" in api_url:
+        api_url = "https://app.platega.io/transaction/process"
+    elif not api_url.rstrip("/").endswith("/transaction/process"):
+        api_url = api_url.rstrip("/") + "/transaction/process"
+
+    # Dev mode: если нет ключей — создаём мок-платёж для тестирования
     if not settings.PLATEGA_MERCHANT_ID or not settings.PLATEGA_SECRET_KEY:
         mock_payment_id = f"mock_{order_id[:8]}"
-        mock_url = f"{api_url.replace('/api/v1/transactions', '')}/pay/mock/{order_id}"
-        
+        mock_base = settings.web_app_url or "https://app.platega.io"
+        if not mock_base.startswith("http"):
+            mock_base = f"https://{mock_base}"
+        mock_url = f"{mock_base.rstrip('/')}/pay/mock/{order_id}"
+
         async with SessionMaker() as session:
             await session.execute(
                 update(Payment)
@@ -488,49 +510,36 @@ async def create_payment(tg_id: int, plan_key: str, amount: float) -> dict:
                 .values(platega_id=mock_payment_id, status="created")
             )
             await session.commit()
-            
-            # Уведомляем веб-сайт
-            if settings.web_api_url and settings.web_api_url.startswith("http") and settings.WEBHOOK_SECRET:
-                try:
-                    import hmac
-                    import hashlib
-                    import json
-                    webhook_payload = {
-                        "eventId": f"bot_payment_{order_id}",
-                        "kind": "platega_payment_created",
-                        "payload": {
-                            "orderId": order_id,
-                            "paymentId": mock_payment_id,
-                            "amount": amount,
-                            "planKey": plan_key,
-                            "userId": tg_id,
-                        },
-                    }
-                    signature = hmac.new(
-                        settings.WEBHOOK_SECRET.encode(),
-                        json.dumps(webhook_payload, sort_keys=True).encode(),
-                        hashlib.sha256
-                    ).hexdigest()
-                    async with aiohttp.ClientSession() as web_session:
-                        async with web_session.post(
-                            f"{settings.web_api_url}/api/webhooks/platega",
-                            json=webhook_payload,
-                            headers={"Content-Type": "application/json", "x-webhook-signature": signature}
-                        ):
-                            pass
-                except Exception:
-                    pass
-        
-        return {"payment_url": mock_url, "payment_id": mock_payment_id}
 
-    # Продакшн: реальный запрос к Platega
+        await _notify_web_payment_created(
+            order_id, mock_payment_id, amount, plan_key, tg_id
+        )
+        return {
+            "payment_url": mock_url,
+            "payment_id": mock_payment_id,
+            "order_id": order_id,
+        }
+
+    app_url = settings.web_app_url or "https://rava.vpn"
+    if not app_url.startswith("http"):
+        app_url = f"https://{app_url}"
+
     payload = {
-        "amount": int(amount * 100),
-        "currency": "RUB",
-        "order_id": order_id,
+        "paymentMethod": method_id,
+        "paymentDetails": {
+            "amount": amount,
+            "currency": "RUB",
+        },
         "description": f"Подписка RavaVPN · {plan_key}",
-        "payment_method": "sbp",
-        "return_url": f"{settings.web_api_url or 'https://rava.vpn'}/webhook/platega",
+        "return": f"{app_url.rstrip('/')}/dashboard?payment=success",
+        "failedUrl": f"{app_url.rstrip('/')}/plans?payment=failed",
+        "payload": order_id,
+        "orderId": order_id,
+        "metadata": {
+            "user_email": f"{tg_id}@telegram.org",
+            "userId": str(tg_id),
+            **({"userName": f"@{username}"} if username else {}),
+        },
     }
 
     headers = {
@@ -539,55 +548,37 @@ async def create_payment(tg_id: int, plan_key: str, amount: float) -> dict:
         "Content-Type": "application/json",
     }
 
-    import aiohttp
     async with aiohttp.ClientSession() as session:
         async with session.post(api_url, json=payload, headers=headers) as resp:
-            data = await resp.json()
+            text = await resp.text()
+            try:
+                data = json.loads(text) if text else {}
+            except json.JSONDecodeError:
+                data = {}
+
             if resp.status == 200:
-                payment_url = data.get("url")
+                payment_url = data.get("redirect") or data.get("url")
                 if payment_url:
-                    async with SessionMaker() as session:
-                        await session.execute(
+                    transaction_id = data.get("transactionId") or data.get("id")
+                    async with SessionMaker() as db_session:
+                        await db_session.execute(
                             update(Payment)
                             .where(Payment.order_id == order_id)
-                            .values(platega_id=data.get("id"), status="created")
+                            .values(platega_id=transaction_id, status="created")
                         )
-                        await session.commit()
-                        
-                        if settings.web_api_url and settings.web_api_url.startswith("http") and settings.WEBHOOK_SECRET:
-                            try:
-                                import hmac
-                                import hashlib
-                                import json
-                                webhook_payload = {
-                                    "eventId": f"bot_payment_{order_id}",
-                                    "kind": "platega_payment_created",
-                                    "payload": {
-                                        "orderId": order_id,
-                                        "paymentId": data.get("id"),
-                                        "amount": amount,
-                                        "planKey": plan_key,
-                                        "userId": tg_id,
-                                    },
-                                }
-                                signature = hmac.new(
-                                    settings.WEBHOOK_SECRET.encode(),
-                                    json.dumps(webhook_payload, sort_keys=True).encode(),
-                                    hashlib.sha256
-                                ).hexdigest()
-                                async with aiohttp.ClientSession() as web_session:
-                                    async with web_session.post(
-                                        f"{settings.web_api_url}/api/webhooks/platega",
-                                        json=webhook_payload,
-                                        headers={"Content-Type": "application/json", "x-webhook-signature": signature}
-                                    ):
-                                        pass
-                            except Exception:
-                                pass
-                        
-                    return {"payment_url": payment_url, "payment_id": data.get("id")}
+                        await db_session.commit()
 
-    # Если ошибка — обновляем статус
+                    await _notify_web_payment_created(
+                        order_id, transaction_id, amount, plan_key, tg_id
+                    )
+                    return {
+                        "payment_url": payment_url,
+                        "payment_id": transaction_id,
+                        "order_id": order_id,
+                    }
+            else:
+                log.warning("Platega create failed: %s %s", resp.status, text)
+
     async with SessionMaker() as session:
         await session.execute(
             update(Payment)
@@ -597,3 +588,55 @@ async def create_payment(tg_id: int, plan_key: str, amount: float) -> dict:
         await session.commit()
 
     raise Exception("Не удалось создать платёж в Platega")
+
+
+async def _notify_web_payment_created(
+    order_id: str,
+    payment_id: str | None,
+    amount: float,
+    plan_key: str,
+    tg_id: int,
+) -> None:
+    """Уведомляем сайт о созданном платеже (best-effort)."""
+    if not (
+        settings.web_api_url
+        and settings.web_api_url.startswith("http")
+        and settings.WEBHOOK_SECRET
+    ):
+        return
+
+    import hashlib
+    import hmac
+    import json
+
+    import aiohttp
+
+    try:
+        webhook_payload = {
+            "eventId": f"bot_payment_{order_id}",
+            "kind": "platega_payment_created",
+            "payload": {
+                "orderId": order_id,
+                "paymentId": payment_id,
+                "amount": amount,
+                "planKey": plan_key,
+                "userId": tg_id,
+            },
+        }
+        signature = hmac.new(
+            settings.WEBHOOK_SECRET.encode(),
+            json.dumps(webhook_payload, sort_keys=True).encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{settings.web_api_url}/api/webhooks/platega",
+                json=webhook_payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-webhook-signature": signature,
+                },
+            ):
+                pass
+    except Exception as exc:  # noqa: BLE001
+        log.warning("web payment notify failed: %s", exc)

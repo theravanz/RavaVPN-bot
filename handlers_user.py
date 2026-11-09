@@ -483,7 +483,9 @@ async def buy_checkout(callback: CallbackQuery, state: FSMContext):
 
     try:
         from database import create_payment
-        result = await create_payment(callback.from_user.id, plan.key, plan.price)
+        result = await create_payment(
+            callback.from_user.id, plan.key, plan.price, pid or "sbp"
+        )
 
         # Сохраняем gift флаг в метаданные платежа
         if is_gift:
