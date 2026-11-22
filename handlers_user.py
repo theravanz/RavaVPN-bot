@@ -66,6 +66,7 @@ async def _assistant_guard(callback: CallbackQuery) -> bool:
     )
     return True
 
+
 TG_SUPPORT_URL = "https://t.me/ravavpnhelp"
 TG_SUPPORT_LABEL = "Написать в поддержку"
 
@@ -88,7 +89,7 @@ SECTION_NAMES = {
 
 async def send_main_menu(message: Message):
     s = await get_settings()
-    kb = main_menu_keyboard(s) 
+    kb = main_menu_keyboard(s)
 
     if s.main_menu_photo_id:
         try:
@@ -190,7 +191,7 @@ async def referral_menu(callback: CallbackQuery):
         callback,
         text=(
             "👥 <b>Реферальная программа</b>\n\n"
-            f"Приглашайте друзей — вы получаете <b>40%</b> от каждого их платежа на партнёрский баланс.\n\n"
+            "Приглашайте друзей — вы получаете <b>40%</b> от каждого их платежа на партнёрский баланс.\n\n"
             f"🔗 Ваша ссылка:\n<code>{bot_link}</code>\n"
             f"{invited_note}\n"
             f"💰 Баланс: <b>{balance:,.2f} ₽</b>\n\n"
@@ -230,27 +231,32 @@ async def subscribe_menu(callback: CallbackQuery, state: FSMContext):
         return
     await state.clear()
 
+    # Проверяем активную подписку
     from database import get_active_subscription, get_plan
     from datetime import datetime
 
     sub = await get_active_subscription(callback.from_user.id)
 
     if sub:
+        # Показываем управление существующей подпиской
         plan_obj = await get_plan(sub.plan)
         plan_name = plan_obj.name if plan_obj else sub.plan
         delta = sub.expires_at - datetime.utcnow()
-        days_left = delta.days
-        hours_left = delta.seconds // 3600
+        days_left = max(delta.days, 0)
+        hours_left = delta.seconds // 3600 if delta.total_seconds() > 0 else 0
 
-        auto_renew_text = "🟢 Включено"
-        next_charge_date = sub.expires_at.strftime('%d.%m.%Y')
+        auto_renew_text = "🟢 Включено"  # можно добавить поле в модель
+        next_charge_date = sub.expires_at.strftime("%d.%m.%Y")
 
+        # Берём название проекта из настроек
         s = await get_settings()
         project_name = s.bot_name if s and s.bot_name else "RavaVPN"
+        # Используем web_app_url если задан, иначе не показываем кнопку подключения
         connect_url = (
             f"{settings.web_app_url}/connect?user={callback.from_user.id}"
             if settings.web_app_url else None
         )
+        price = plan_obj.price if plan_obj else 250
 
         text = (
             f"💳 <b>Подписка {project_name}</b>\n\n"
@@ -258,7 +264,7 @@ async def subscribe_menu(callback: CallbackQuery, state: FSMContext):
             f"🕓 Осталось: <b>{days_left} дн. {hours_left} ч.</b>\n"
             f"💻 Можно подключить до: <b>3 устройств</b>\n"
             f"🔄 Автопродление: {auto_renew_text}\n\n"
-            f"⚠️ Списание 250 ₽ произойдёт <b>{next_charge_date}</b> 00:01.\n"
+            f"⚠️ Списание {price:,.0f} ₽ произойдёт <b>{next_charge_date}</b> 00:01.\n"
             "Если оплата не пройдёт, подписка будет приостановлена."
         )
 
@@ -324,7 +330,6 @@ async def buy_devices_step(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     _, _, key, n = callback.data.split(":")
     n = max(3, min(10, int(n)))
-    s = await get_settings()
     kb = InlineKeyboardBuilder()
     kb.button(text="➖", callback_data=f"buy:dev:{key}:{n - 1}")
     kb.button(text=f"{n} {'устройство' if n == 3 else 'устройства' if n <= 4 else 'устройств'}", callback_data="noop")
@@ -488,18 +493,22 @@ async def buy_checkout(callback: CallbackQuery, state: FSMContext):
             callback.from_user.id, plan.key, plan.price, pid or "sbp"
         )
 
-        # Сохраняем gift флаг в метаданные платежа
-        if is_gift:
-            from database import SessionMaker, Payment
-            from sqlalchemy import update
-            import json
-            async with SessionMaker() as session:
-                await session.execute(
-                    update(Payment)
-                    .where(Payment.order_id == result['order_id'])
-                    .values(meta=json.dumps({"plan_key": plan.key, "is_gift": True, "buyer_id": callback.from_user.id}))
-                )
-                await session.commit()
+        # Сохраняем gift флаг (и devices) в метаданные платежа
+        from database import SessionMaker, Payment
+        from sqlalchemy import update
+        import json
+        async with SessionMaker() as session:
+            await session.execute(
+                update(Payment)
+                .where(Payment.order_id == result['order_id'])
+                .values(meta=json.dumps({
+                    "plan_key": plan.key,
+                    "devices": n,
+                    "is_gift": is_gift,
+                    "buyer_id": callback.from_user.id,
+                }))
+            )
+            await session.commit()
 
         await callback.message.answer(
             text=(
@@ -516,19 +525,22 @@ async def buy_checkout(callback: CallbackQuery, state: FSMContext):
             parse_mode="HTML"
         )
     except Exception as e:
-                "После оплаты нажмите «Проверить оплату».\n"
-                f"🔗 <a href=\"{result['payment_url']}\">{result['payment_url']}</a>"
-
-
-# ========= ПРОМОКОД =========
-
+        await callback.message.answer(
+            text=(
+                "⚠️ <b>Не удалось создать платёж</b>\n\n"
+                f"Причина: <code>{e}</code>\n\n"
+                "Попробуйте ещё раз чуть позже или обратитесь в поддержку."
+            ),
+            reply_markup=InlineKeyboardBuilder().button(
+                text="🔁 Повторить", callback_data="buy:checkout"
+            ).adjust(1).as_markup(),
+        )
 
 
 @router.callback_query(F.data == "buy:checking")
 async def buy_checking(callback: CallbackQuery, state: FSMContext):
     """Показываем сообщение ожидания создания платежа"""
     await callback.answer()
-    # Сообщаем пользователю, что идёт создание платежа
     await callback.message.answer(
         text="⏳ Идёт создание платежа в Platega...",
         reply_markup=InlineKeyboardBuilder().button(
@@ -543,24 +555,24 @@ async def buy_verify(callback: CallbackQuery, state: FSMContext):
     """Проверяем статус платежа в Platega"""
     await callback.answer()
     payment_id = callback.data.split(":")[2]
-    
+
     # Проверяем статус платежа в БД бота
     from database import SessionMaker, Payment, Subscription
     from sqlalchemy import select, update
     from datetime import datetime, timedelta
-    
+
     async with SessionMaker() as session:
         result = await session.execute(
             select(Payment).where(Payment.platega_id == payment_id)
         )
         payment = result.scalar_one_or_none()
-    
+
     if not payment:
         await callback.message.answer("❌ Платёж не найден")
         return
-    
+
     if payment.status == "paid" or payment.status == "created":
-        # Для мока: сразу переводим в paid и создаём подписку
+        # Для мока: сразу переводим в paid
         if payment.status == "created":
             async with SessionMaker() as session:
                 await session.execute(
@@ -569,28 +581,30 @@ async def buy_verify(callback: CallbackQuery, state: FSMContext):
                     .values(status="paid")
                 )
                 await session.commit()
-        
-        # Создаём/активируем подписку
+
+        # Определяем план/устройства/длительность — ДО ветки с подпиской,
+        # чтобы переменные были доступны в любом случае
+        import json
+        try:
+            meta = json.loads(payment.meta) if payment.meta else {}
+        except Exception:
+            meta = {}
+        plan_key = meta.get("plan_key", "1m")
+        devices_limit = meta.get("devices", 3)
+
+        from database import get_plan
+        plan_obj = await get_plan(plan_key)
+        days = plan_obj.days if plan_obj else 30
+
+        # Создаём подписку, если её ещё нет
         async with SessionMaker() as session:
-            # Проверяем, есть ли уже подписка
             existing = await session.execute(
-                select(Subscription).where(Subscription.user_id == callback.from_user.id, Subscription.status == "active")
+                select(Subscription).where(
+                    Subscription.user_id == callback.from_user.id,
+                    Subscription.status == "active",
+                )
             )
             if not existing.scalar_one_or_none():
-                # Определяем план из payment.meta
-                plan_key = "1m"
-                try:
-                    import json
-                    meta = json.loads(payment.meta) if payment.meta else {}
-                    plan_key = meta.get("plan_key", "1m")
-                except Exception:
-                    pass
-                
-                # Получаем длительность плана из БД
-                from database import get_plan
-                plan_obj = await get_plan(plan_key)
-                days = plan_obj.days if plan_obj else 30
-                
                 session.add(Subscription(
                     user_id=callback.from_user.id,
                     plan=plan_key,
@@ -599,30 +613,36 @@ async def buy_verify(callback: CallbackQuery, state: FSMContext):
                     expires_at=datetime.utcnow() + timedelta(days=days),
                 ))
                 await session.commit()
-        
+
         # Формируем красивое сообщение об успехе
         s = await get_settings()
         project_name = s.bot_name if s and s.bot_name else "RavaVPN"
-        # Используем web_app_url если задан, иначе не показываем кнопку подключения
-        # Используем web_app_url если задан, иначе не показываем кнопку подключения
-        connect_url = f"{settings.web_app_url}/connect?user={callback.from_user.id}" if settings.web_app_url else None
-        
+        # Используем web_app_url если задан, иначе не показываем кнопку/ссылку подключения
+        connect_url = (
+            f"{settings.web_app_url}/connect?user={callback.from_user.id}"
+            if settings.web_app_url else None
+        )
+        expires_at = datetime.utcnow() + timedelta(days=days)
+
+        connect_line = (
+            f"🔗 <b>Ссылка на подключение:</b>\n<code>{connect_url}</code>\n\n"
+            if connect_url else ""
+        )
         text = (
             "✅ <b>Платёж подтверждён!</b>\n"
             f"🎉 <b>Подписка {project_name} успешно активирована</b>\n\n"
-            f"🔗 <b>Ссылка на подключение:</b>\n"
-            f"<code>{connect_url}</code>\n\n"
-            f"📱 <b>Лимит устройств:</b> {devices_limit}\n"
-            f"📅 <b>Действует до:</b> {(datetime.utcnow() + timedelta(days=days)).strftime('%d.%m.%Y')}"
+            + connect_line
+            + f"📱 <b>Лимит устройств:</b> {devices_limit}\n"
+            f"📅 <b>Действует до:</b> {expires_at.strftime('%d.%m.%Y')}"
         )
-        
+
         kb = InlineKeyboardBuilder()
         if connect_url:
             kb.button(text="🔗 Подключиться", url=connect_url)
         kb.button(text="📤 Поделиться", callback_data=f"share:sub:{callback.from_user.id}")
         kb.button(text="🛠 Управлять устройствами", callback_data="menu:devices")
         kb.adjust(1)
-        
+
         await callback.message.answer(
             text=text,
             reply_markup=kb.as_markup(),
@@ -638,6 +658,8 @@ async def buy_verify(callback: CallbackQuery, state: FSMContext):
         )
     else:
         await callback.message.answer(f"❌ Статус платежа: {payment.status}")
+
+
 @router.callback_query(F.data == "menu:promo")
 async def promo_menu(callback: CallbackQuery):
     await callback.answer()
