@@ -229,52 +229,53 @@ async def subscribe_menu(callback: CallbackQuery, state: FSMContext):
     if await _assistant_guard(callback):
         return
     await state.clear()
-    
-    # Проверяем активную подписку
+
     from database import get_active_subscription, get_plan
     from datetime import datetime
-    
+
     sub = await get_active_subscription(callback.from_user.id)
+
     if sub:
-        # Показываем управление существующей подпиской
         plan_obj = await get_plan(sub.plan)
         plan_name = plan_obj.name if plan_obj else sub.plan
-        days_left = (sub.expires_at - datetime.utcnow()).days
-        hours_left = int((sub.expires_at - datetime.utcnow()).seconds / 3600)
-        
-        auto_renew_text = "🟢 Включено" if True else "🔴 Выключено"  # можно добавить поле в модель
-        next_charge_date = (sub.expires_at).strftime('%d.%m.%Y')
-        
-        # Берём название проекта из настроек
+        delta = sub.expires_at - datetime.utcnow()
+        days_left = delta.days
+        hours_left = delta.seconds // 3600
+
+        auto_renew_text = "🟢 Включено"
+        next_charge_date = sub.expires_at.strftime('%d.%m.%Y')
+
         s = await get_settings()
         project_name = s.bot_name if s and s.bot_name else "RavaVPN"
-        # Используем web_app_url если задан, иначе не показываем кнопку подключения
-        connect_url = f"{settings.web_app_url}/connect?user={callback.from_user.id}" if settings.web_app_url else None
-        
+        connect_url = (
+            f"{settings.web_app_url}/connect?user={callback.from_user.id}"
+            if settings.web_app_url else None
+        )
+
         text = (
-        f"💳 <b>Подписка {project_name}</b>\n\n"
-        f"ℹ️ Статус: 🟢 <b>Активна</b>\n"
-        f"🕓 Осталось: <b>{days_left} дн. {hours_left} ч.</b>\n"
-        f"💻 Можно подключить до: <b>3 устройств</b>\n"
-        f"🔄 Автопродление: {auto_renew_text}\n\n"
-        f"⚠️ Списание 250 ₽ произойдёт <b>{next_charge_date}</b> 00:01.\n"
-        "Если оплата не пройдёт, подписка будет приостановлена."
-    )
-    
-    kb = InlineKeyboardBuilder()
-    if connect_url:
-        kb.button(text="🔗 Подключиться", url=connect_url)
-    kb.button(text="📋 Скопировать ссылку", callback_data=f"copy:connect:{callback.from_user.id}")
-    kb.button(text="🎁 Подарить подписку", callback_data="menu:gifts")
-    kb.button(text="🛠 Управление устройствами", callback_data="menu:devices")
-    kb.button(text="🔁 Продлить", callback_data="menu:renew")
-    kb.button(text="🔄 Автопродление", callback_data="menu:autorenew")
-    kb.button(text="⬅️ Назад", callback_data="menu:main")
-    kb.adjust(1)
-        
-    await _swap(callback, text=text, kb=kb.as_markup())
-    return
-    
+            f"💳 <b>Подписка {project_name}</b>\n\n"
+            f"ℹ️ Статус: 🟢 <b>Активна</b>\n"
+            f"🕓 Осталось: <b>{days_left} дн. {hours_left} ч.</b>\n"
+            f"💻 Можно подключить до: <b>3 устройств</b>\n"
+            f"🔄 Автопродление: {auto_renew_text}\n\n"
+            f"⚠️ Списание 250 ₽ произойдёт <b>{next_charge_date}</b> 00:01.\n"
+            "Если оплата не пройдёт, подписка будет приостановлена."
+        )
+
+        kb = InlineKeyboardBuilder()
+        if connect_url:
+            kb.button(text="🔗 Подключиться", url=connect_url)
+        kb.button(text="📋 Скопировать ссылку", callback_data=f"copy:connect:{callback.from_user.id}")
+        kb.button(text="🎁 Подарить подписку", callback_data="menu:gifts")
+        kb.button(text="🛠 Управление устройствами", callback_data="menu:devices")
+        kb.button(text="🔁 Продлить", callback_data="menu:renew")
+        kb.button(text="🔄 Автопродление", callback_data="menu:autorenew")
+        kb.button(text="⬅️ Назад", callback_data="menu:main")
+        kb.adjust(1)
+
+        await _swap(callback, text=text, kb=kb.as_markup())
+        return
+
     # Нет активной подписки — показываем покупку
     await _swap(
         callback,
